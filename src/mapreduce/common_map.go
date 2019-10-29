@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"hash/fnv"
 	"io/ioutil"
-	"log"
 	"os"
 )
 
@@ -47,31 +46,37 @@ func doMap(
 
 	buf, err := ioutil.ReadFile(inFile)
 	if err != nil {
-		log.Fatal("doMap.ReadInputFile", err)
 		return
 	}
 	contents := string(buf)
 	kvs := mapF(inFile, contents)
 	nKvs := len(kvs)
-	eachReduce := nKvs / nReduce + 1
 
+	outputFiles := make([]*os.File, 0)
+	encs := make([]*json.Encoder, 0)
 	for r := 0; r < nReduce; r++ {
 		outputFileName := reduceName(jobName, mapTaskNumber, r)
 		outputFile, err := os.Create(outputFileName)
 		if err != nil {
-			log.Fatal("doMap.CreateOutputFile", err)
 			return
 		}
-		defer outputFile.Close()
-
+		outputFiles = append(outputFiles, outputFile)
 		enc := json.NewEncoder(outputFile)
-		for i := r * eachReduce; i < (r + 1) * eachReduce && i < nKvs; i++ {
-			kv := kvs[i]
-			err := enc.Encode(&kv)
-			if err != nil {
-				log.Fatal("doMap.EncodeJson", err)
-				return
-			}
+		encs = append(encs, enc)
+	}
+	defer func() {
+		for r := 0; r < nReduce; r++ {
+			outputFiles[r].Close()
+		}
+	}()
+
+	for i := 0; i < nKvs; i++ {
+		kv := kvs[i]
+		r := int(ihash(kv.Key)) % nReduce
+		enc := encs[r]
+		err = enc.Encode(&kv)
+		if err != nil {
+			return
 		}
 	}
 }
