@@ -27,7 +27,6 @@ func (mr *Master) schedule(phase jobPhase) {
 		for i := 0; i < ntasks; i++ {
 			taskChan <- i
 		}
-		close(taskChan)
 	}()
 
 	doneChan := make(chan struct{})
@@ -40,8 +39,12 @@ func (mr *Master) schedule(phase jobPhase) {
 			args := DoTaskArgs {
 				mr.jobName, mr.files[taskI], phase, taskI, nios,
 			}
-			_ = call(workerAddr, "Worker.DoTask", &args, new(struct{}))
-			doneChan <- struct{}{}
+			ok = call(workerAddr, "Worker.DoTask", &args, new(struct{}))
+			if ok {
+				doneChan <- struct{}{}
+			} else {
+				taskChan <- taskI
+			}
 		}
 	}
 
@@ -62,6 +65,7 @@ func (mr *Master) schedule(phase jobPhase) {
 			}
 		}
 	}
+	close(taskChan)
 
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
