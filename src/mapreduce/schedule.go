@@ -21,8 +21,47 @@ func (mr *Master) schedule(phase jobPhase) {
 	// them have been completed successfully should the function return.
 	// Remember that workers may fail, and that any given worker may finish
 	// multiple tasks.
-	//
-	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
-	//
+
+	taskChan := make(chan int)
+	go func() {
+		for i := 0; i < ntasks; i++ {
+			taskChan <- i
+		}
+		close(taskChan)
+	}()
+
+	doneChan := make(chan struct{})
+	boss := func(workerAddr string) { // boss makes workers work :|
+		for {
+			taskI, ok := <-taskChan
+			if !ok {
+				break
+			}
+			args := DoTaskArgs {
+				mr.jobName, mr.files[taskI], phase, taskI, nios,
+			}
+			_ = call(workerAddr, "Worker.DoTask", &args, new(struct{}))
+			doneChan <- struct{}{}
+		}
+	}
+
+	for _, wa := range mr.workers {
+		go boss(wa)
+	}
+
+	nTaskDone := 0
+	L:
+	for {
+		select {
+		case wa := <-mr.registerChannel:
+			go boss(wa)
+		case <- doneChan:
+			nTaskDone++
+			if nTaskDone == ntasks {
+				break L
+			}
+		}
+	}
+
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
