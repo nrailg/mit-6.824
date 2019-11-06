@@ -38,6 +38,7 @@ const (
 const (
 	electionTimeoutMin = 150
 	electionTimeoutMax = 300
+	leaderIdle = 50
 )
 
 //
@@ -56,7 +57,7 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mutex        sync.Mutex
+	mutex     sync.Mutex
 	peers     []*labrpc.ClientEnd
 	persister *Persister
 	me        int // index into peers[]
@@ -143,6 +144,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(req RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	// TODO up to date
+	//DPrintf("%d RequestVote\n", rf.me)
 
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
@@ -190,6 +192,7 @@ func (rf *Raft) RequestVote(req RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, req RequestVoteArgs, reply *RequestVoteReply) bool {
+	//DPrintf("%d sendRequestVote to %d\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", req, reply)
 	return ok
 }
@@ -209,6 +212,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
+	//DPrintf("%d AppendEntries\n", rf.me)
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
 
@@ -275,6 +279,7 @@ func (rf *Raft) runAsFollower() {
 	select {
 	case <- rf.heartbeatCh:
 	case <- time.After(rf.electionTimeout):
+		//DPrintf("node %d turn candidate\n", rf.me)
 		rf.mutex.Lock()
 		rf.state = eCandidate
 		rf.mutex.Unlock()
@@ -352,6 +357,7 @@ func (rf *Raft) runAsCandidate() {
 			rf.mutex.Lock()
 			defer rf.mutex.Unlock()
 			if becomeLeader {
+				//DPrintf("node %d turn leader\n", rf.me)
 				rf.state = eLeader
 			} else {
 				rf.state = eFollower
@@ -384,17 +390,34 @@ func (rf *Raft) runAsLeader() {
 		if i == rf.me {
 			continue
 		}
+		//DPrintf("%d sendAppendEntries to %d\n", rf.me, i)
 		go func(pi int) {
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(pi, req, &reply)
-			if ok {
-				rf.mutex.Lock()
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-				}
+			if !ok {
+				//DPrintf("leader %d to %d rpc err\n", rf.me, pi)
+				return
+			}
+			rf.mutex.Lock()
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.mutex.Unlock()
+				// DPrintf("leader %d got heartbeat from %d (term %d)?\n", rf.me, pi, reply.Term)
+				rf.heartbeatCh <- reply.Term
+			} else {
 				rf.mutex.Unlock()
 			}
 		}(i)
+	}
+
+	select {
+	case <-time.After(leaderIdle * time.Millisecond):
+	case <- rf.heartbeatCh:
+		func() {
+			rf.mutex.Lock()
+			defer rf.mutex.Unlock()
+			rf.state = eFollower
+		}()
 	}
 }
 
