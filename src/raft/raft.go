@@ -82,9 +82,16 @@ type Raft struct {
 	recvRequestVoteReply chan RequestVoteReply
 	recvAppendEntriesReq chan AppendEntriesReqAndReplyChan
 	recvAppendEntriesReply chan AppendEntriesReply
+	recvGetState chan chan GetStateReply
+	recvStartReq chan StartReqAndReplyChan
 
 	currentTerm int
 	votedFor int
+}
+
+type GetStateReply struct{
+	term int
+	state state
 }
 
 // return currentTerm and whether this server
@@ -94,10 +101,11 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 
 	// Your code here.
-	rf.mtx.Lock()
-	defer rf.mtx.Unlock()
-	term = rf.currentTerm
-	isleader = rf.state == eLeader
+	ch := make(chan GetStateReply)
+	rf.recvGetState <- ch
+	reply := <-ch
+	term = reply.term
+	isleader = reply.state == eLeader
 
 	return term, isleader
 }
@@ -210,6 +218,16 @@ func (rf *Raft) sendAppendEntries(server int, req AppendEntriesReq, reply *Appen
 	return ok
 }
 
+type StartReply struct {
+	index int
+	term int
+	isLeader bool
+}
+
+type StartReqAndReplyChan struct {
+	command interface{}
+	ch chan StartReply
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -225,10 +243,13 @@ func (rf *Raft) sendAppendEntries(server int, req AppendEntriesReq, reply *Appen
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	replyCh := make(chan StartReply)
+	rf.recvStartReq <- StartReqAndReplyChan{command, replyCh}
+	reply := <-replyCh
 
+	index := reply.index
+	term := reply.term
+	isLeader := reply.isLeader
 
 	return index, term, isLeader
 }
@@ -312,6 +333,12 @@ func (rf *Raft) runAsFollower() {
 	waitUntil := time.Now().Add(rf.electionTimeout)
 	for {
 		select {
+		case ch := <-rf.recvGetState:
+			ch <- GetStateReply{rf.currentTerm, rf.state}
+
+		case rc := <-rf.recvStartReq:
+			rc.ch <- StartReply{0, rf.currentTerm, false}
+
 		case rc := <-rf.recvRequestVoteReq:
 			rf.handleRequestVoteReq(rc)
 			return
@@ -367,6 +394,12 @@ func (rf *Raft) runAsCandidate() {
 	quorum := n / 2 + 1
 	for {
 		select {
+		case ch := <-rf.recvGetState:
+			ch <- GetStateReply{rf.currentTerm, rf.state}
+
+		case rc := <-rf.recvStartReq:
+			rc.ch <- StartReply{0, rf.currentTerm, false}
+
 		case rc := <-rf.recvRequestVoteReq:
 			suppressed := rf.handleRequestVoteReq(rc)
 			if suppressed {
@@ -436,9 +469,16 @@ func (rf *Raft) runAsLeader() {
 		}
 
 		waitUntil := time.Now().Add(leaderIdle * time.Millisecond)
-		L1:
+		WAIT_DONE:
 		for {
 			select {
+			case ch := <-rf.recvGetState:
+				ch <- GetStateReply{rf.currentTerm, rf.state}
+
+			case rc := <-rf.recvStartReq:
+				// TODO
+				rc.ch <- StartReply{0, rf.currentTerm, false}
+
 			case rc := <-rf.recvRequestVoteReq:
 				suppressed := rf.handleRequestVoteReq(rc)
 				if suppressed {
@@ -468,7 +508,7 @@ func (rf *Raft) runAsLeader() {
 				}
 
 			case <- time.After(waitUntil.Sub(time.Now())):
-				break L1
+				break WAIT_DONE
 			}
 		}
 	}
@@ -515,6 +555,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.recvRequestVoteReply = make(chan RequestVoteReply)
 	rf.recvAppendEntriesReq = make(chan AppendEntriesReqAndReplyChan)
 	rf.recvAppendEntriesReply = make(chan AppendEntriesReply)
+	rf.recvGetState = make(chan chan GetStateReply)
+	rf.recvStartReq = make(chan StartReqAndReplyChan)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
