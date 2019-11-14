@@ -53,11 +53,21 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+type RequestVoteReqAndReplyChan struct {
+	req RequestVoteReq
+	ch chan RequestVoteReply
+}
+
+type AppendEntriesReqAndReplyChan struct {
+	req AppendEntriesReq
+	ch chan AppendEntriesReply
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mutex     sync.Mutex
+	mtx     sync.Mutex
 	peers     []*labrpc.ClientEnd
 	persister *Persister
 	me        int // index into peers[]
@@ -68,7 +78,10 @@ type Raft struct {
 
 	electionTimeout time.Duration
 	state state
-	heartbeatCh chan int
+	recvRequestVoteReq chan RequestVoteReqAndReplyChan
+	recvRequestVoteReply chan RequestVoteReply
+	recvAppendEntriesReq chan AppendEntriesReqAndReplyChan
+	recvAppendEntriesReply chan AppendEntriesReply
 
 	currentTerm int
 	votedFor int
@@ -81,8 +94,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 
 	// Your code here.
-	rf.mutex.Lock()
-	defer rf.mutex.Unlock()
+	rf.mtx.Lock()
+	defer rf.mtx.Unlock()
 	term = rf.currentTerm
 	isleader = rf.state == eLeader
 
@@ -121,7 +134,7 @@ func (rf *Raft) readPersist(data []byte) {
 //
 // example RequestVote RPC arguments structure.
 //
-type RequestVoteArgs struct {
+type RequestVoteReq struct {
 	// Your data here.
 	Term int
 	CandidateId int
@@ -141,37 +154,11 @@ type RequestVoteReply struct {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(req RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(req RequestVoteReq, reply *RequestVoteReply) {
 	// Your code here.
-	// TODO up to date
-	//DPrintf("%d RequestVote\n", rf.me)
-
-	rf.mutex.Lock()
-	defer rf.mutex.Unlock()
-
-	if req.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-
-	} else if req.Term == rf.currentTerm {
-		reply.Term = rf.currentTerm
-		if rf.votedFor == -1 {
-			reply.VoteGranted = true
-		} else {
-			reply.VoteGranted = false
-		}
-		go func() {
-			rf.heartbeatCh <- req.Term
-		}()
-
-	} else {
-		rf.currentTerm = req.Term
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = true
-		go func() {
-			rf.heartbeatCh <- req.Term
-		}()
-	}
+	replyCh := make(chan RequestVoteReply)
+	rf.recvRequestVoteReq <- RequestVoteReqAndReplyChan{req, replyCh}
+	*reply = <-replyCh
 }
 
 //
@@ -191,7 +178,7 @@ func (rf *Raft) RequestVote(req RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, req RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, req RequestVoteReq, reply *RequestVoteReply) bool {
 	//DPrintf("%d sendRequestVote to %d\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", req, reply)
 	return ok
@@ -213,28 +200,9 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
 	//DPrintf("%d AppendEntries\n", rf.me)
-	rf.mutex.Lock()
-	defer rf.mutex.Unlock()
-
-	if req.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-
-	} else if req.Term == rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = true
-		go func() {
-			rf.heartbeatCh <- req.Term
-		}()
-
-	} else {
-		rf.currentTerm = req.Term
-		reply.Term = rf.currentTerm
-		reply.Success = true
-		go func() {
-			rf.heartbeatCh <- req.Term
-		}()
-	}
+	replyCh := make(chan AppendEntriesReply)
+	rf.recvAppendEntriesReq <- AppendEntriesReqAndReplyChan{req, replyCh}
+	*reply = <-replyCh
 }
 
 func (rf *Raft) sendAppendEntries(server int, req AppendEntriesReq, reply *AppendEntriesReply) bool {
@@ -275,149 +243,234 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) handleRequestVoteReq(rc RequestVoteReqAndReplyChan) bool {
+	req := rc.req
+	ch := rc.ch
+	reply := RequestVoteReply{}
+	suppressed := false
+
+	if req.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+
+	} else if req.Term == rf.currentTerm {
+		reply.Term = rf.currentTerm
+		if rf.votedFor == -1 || rf.votedFor == req.CandidateId {
+			rf.votedFor = req.CandidateId
+			reply.VoteGranted = true
+		} else {
+			reply.VoteGranted = false
+		}
+
+	} else {
+		rf.currentTerm = req.Term
+		rf.votedFor = req.CandidateId
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = true
+		suppressed = true
+	}
+	ch <- reply
+	return suppressed
+}
+
+func (rf *Raft) handleAppendEntriesReq(rc AppendEntriesReqAndReplyChan) bool {
+	req := rc.req
+	ch := rc.ch
+	reply := AppendEntriesReply{}
+	suppressed := false
+
+	if req.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+
+	} else if req.Term == rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		suppressed = true
+
+	} else {
+		rf.currentTerm = req.Term
+		rf.votedFor = -1
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		suppressed = true
+	}
+	ch <- reply
+	return suppressed
+}
+
+func (rf *Raft) handleUnexpectedReply(Term int) bool {
+	if Term <= rf.currentTerm {
+		return false
+	}
+	rf.currentTerm = Term
+	rf.votedFor = -1
+	return true
+}
+
 func (rf *Raft) runAsFollower() {
-	select {
-	case <- rf.heartbeatCh:
-	case <- time.After(rf.electionTimeout):
-		//DPrintf("node %d turn candidate\n", rf.me)
-		rf.mutex.Lock()
-		rf.state = eCandidate
-		rf.mutex.Unlock()
+	waitUntil := time.Now().Add(rf.electionTimeout)
+	for {
+		select {
+		case rc := <-rf.recvRequestVoteReq:
+			rf.handleRequestVoteReq(rc)
+			return
+
+		case reply := <-rf.recvRequestVoteReply:
+			rf.handleUnexpectedReply(reply.Term)
+
+		case rc := <-rf.recvAppendEntriesReq:
+			rf.handleAppendEntriesReq(rc)
+			return
+
+		case reply := <-rf.recvAppendEntriesReply:
+			rf.handleUnexpectedReply(reply.Term)
+
+		case <- time.After(waitUntil.Sub(time.Now())):
+			//DPrintf("node %d turn candidate\n", rf.me)
+			rf.state = eCandidate
+			return
+		}
 	}
 }
 
 func (rf *Raft) runAsCandidate() {
-	n := len(rf.peers) // TODO variable
-	voteCh := make(chan bool)
-	becomeLeaderCh := make(chan bool)
+	rf.currentTerm++
+	rf.votedFor = rf.me
 
-	func() {
-		rf.mutex.Lock()
-		defer rf.mutex.Unlock()
+	n := len(rf.peers)
+	if n == 1 {
+		rf.state = eLeader
+		return
+	}
 
-		rf.currentTerm++
-		rf.votedFor = rf.me
+	req := RequestVoteReq{
+		rf.currentTerm, rf.me, 0, 0, // TODO
+	}
+	for i := 0; i < n; i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(pi int) {
+			reply := RequestVoteReply{}
+			ok := rf.sendRequestVote(pi, req, &reply)
+			if !ok {
+				reply.Term = 0
+				reply.VoteGranted = false
+			}
+			rf.recvRequestVoteReply <- reply
+		}(i)
+	}
 
-		args := RequestVoteArgs{
-			rf.currentTerm, rf.me, 0, 0, // TODO
+	waitUntil := time.Now().Add(rf.electionTimeout)
+	vote := 1
+	quorum := n / 2 + 1
+	for {
+		select {
+		case rc := <-rf.recvRequestVoteReq:
+			suppressed := rf.handleRequestVoteReq(rc)
+			if suppressed {
+				rf.state = eFollower
+				return
+			}
+
+		case reply := <-rf.recvRequestVoteReply:
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.state = eFollower
+				return
+
+			} else if reply.Term == rf.currentTerm {
+				if reply.VoteGranted {
+					vote++
+					if vote == quorum {
+						// to avoid leaking, trailing replies are read in leader routine.
+						rf.state = eLeader
+						return
+					}
+				}
+			}
+
+		case rc := <-rf.recvAppendEntriesReq:
+			suppressed := rf.handleAppendEntriesReq(rc)
+			if suppressed {
+				rf.state = eFollower
+				return
+			}
+
+		case reply := <-rf.recvAppendEntriesReply:
+			// TODO warn weired case
+			suppressed := rf.handleUnexpectedReply(reply.Term)
+			if suppressed {
+				rf.state = eFollower
+				return
+			}
+
+		case <- time.After(waitUntil.Sub(time.Now())):
+			return
+		}
+	}
+}
+
+func (rf *Raft) runAsLeader() {
+	n := len(rf.peers)
+
+	for { // every `leaderIdle` milliseconds
+		req := AppendEntriesReq{
+			rf.currentTerm, rf.me,
 		}
 		for i := 0; i < n; i++ {
 			if i == rf.me {
 				continue
 			}
 			go func(pi int) {
-				reply := RequestVoteReply{}
-				ok := rf.sendRequestVote(pi, args, &reply)
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(pi, req, &reply)
 				if !ok {
-					voteCh <- false
-				} else {
-					rf.mutex.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.mutex.Unlock()
-						rf.heartbeatCh <- reply.Term
-					} else {
-						rf.mutex.Unlock()
-					}
-
-					if reply.VoteGranted {
-						voteCh <- true
-					} else {
-						voteCh <- false
-					}
+					reply.Term = 0
+					reply.Success = false
 				}
+				rf.recvAppendEntriesReply <- reply
 			}(i)
 		}
-	}()
 
-	go func() {
-		if n == 1 {
-			becomeLeaderCh <- true
-			return
-		}
-		quorum := n / 2 + 1
-		nVote := 1
-		for i := 0; i < n - 1; i++ {
-			vote := <-voteCh
-			if vote {
-				nVote++
-				if nVote == quorum {
-					becomeLeaderCh <- true
+		waitUntil := time.Now().Add(leaderIdle * time.Millisecond)
+		L1:
+		for {
+			select {
+			case rc := <-rf.recvRequestVoteReq:
+				suppressed := rf.handleRequestVoteReq(rc)
+				if suppressed {
+					rf.state = eFollower
+					return
 				}
+
+			case reply := <-rf.recvRequestVoteReply:
+				suppressed := rf.handleUnexpectedReply(reply.Term)
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+
+			case rc := <-rf.recvAppendEntriesReq:
+				suppressed := rf.handleAppendEntriesReq(rc)
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+
+			case reply := <-rf.recvAppendEntriesReply:
+				suppressed := rf.handleUnexpectedReply(reply.Term)
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+
+			case <- time.After(waitUntil.Sub(time.Now())):
+				break L1
 			}
 		}
-		if nVote < quorum {
-			becomeLeaderCh <- false
-		}
-	}()
-
-	select {
-	case becomeLeader := <-becomeLeaderCh:
-		func() {
-			rf.mutex.Lock()
-			defer rf.mutex.Unlock()
-			if becomeLeader {
-				//DPrintf("node %d turn leader\n", rf.me)
-				rf.state = eLeader
-			} else {
-				rf.state = eFollower
-			}
-		}()
-
-	case <- rf.heartbeatCh:
-		func() {
-			rf.mutex.Lock()
-			defer rf.mutex.Unlock()
-			rf.state = eFollower
-		}()
-
-	case <- time.After(rf.electionTimeout):
-		func() {
-			rf.mutex.Lock()
-			defer rf.mutex.Unlock()
-			rf.state = eFollower
-		}()
-	}
-}
-
-func (rf *Raft) runAsLeader() {
-	nPeers := len(rf.peers)
-
-	req := AppendEntriesReq{
-		rf.currentTerm, rf.me,
-	}
-	for i := 0; i < nPeers; i++ {
-		if i == rf.me {
-			continue
-		}
-		//DPrintf("%d sendAppendEntries to %d\n", rf.me, i)
-		go func(pi int) {
-			reply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(pi, req, &reply)
-			if !ok {
-				//DPrintf("leader %d to %d rpc err\n", rf.me, pi)
-				return
-			}
-			rf.mutex.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.mutex.Unlock()
-				// DPrintf("leader %d got heartbeat from %d (term %d)?\n", rf.me, pi, reply.Term)
-				rf.heartbeatCh <- reply.Term
-			} else {
-				rf.mutex.Unlock()
-			}
-		}(i)
-	}
-
-	select {
-	case <-time.After(leaderIdle * time.Millisecond):
-	case <- rf.heartbeatCh:
-		func() {
-			rf.mutex.Lock()
-			defer rf.mutex.Unlock()
-			rf.state = eFollower
-		}()
 	}
 }
 
@@ -458,7 +511,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here.
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.heartbeatCh = make(chan int)
+	rf.recvRequestVoteReq = make(chan RequestVoteReqAndReplyChan)
+	rf.recvRequestVoteReply = make(chan RequestVoteReply)
+	rf.recvAppendEntriesReq = make(chan AppendEntriesReqAndReplyChan)
+	rf.recvAppendEntriesReply = make(chan AppendEntriesReply)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
