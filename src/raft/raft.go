@@ -53,14 +53,19 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
-type RequestVoteReqAndReplyChan struct {
+type requestVoteReqAndReplyChan struct {
 	req RequestVoteReq
 	ch chan RequestVoteReply
 }
 
-type AppendEntriesReqAndReplyChan struct {
+type appendEntriesReqAndReplyChan struct {
 	req AppendEntriesReq
 	ch chan AppendEntriesReply
+}
+
+type logEntry struct {
+	command interface{}
+	term int
 }
 
 //
@@ -78,18 +83,24 @@ type Raft struct {
 
 	electionTimeout time.Duration
 	state state
-	recvRequestVoteReq chan RequestVoteReqAndReplyChan
+	recvRequestVoteReq chan requestVoteReqAndReplyChan
 	recvRequestVoteReply chan RequestVoteReply
-	recvAppendEntriesReq chan AppendEntriesReqAndReplyChan
+	recvAppendEntriesReq chan appendEntriesReqAndReplyChan
 	recvAppendEntriesReply chan AppendEntriesReply
-	recvGetState chan chan GetStateReply
-	recvStartReq chan StartReqAndReplyChan
+	recvGetState chan chan getStateReply
+	recvStartReq chan startReqAndReplyChan
+	applyCh chan ApplyMsg
 
 	currentTerm int
 	votedFor int
+	log []logEntry
+	commitIndex int
+	lastApplied int
+	nextIndex []int
+	matchIndex []int
 }
 
-type GetStateReply struct{
+type getStateReply struct{
 	term int
 	state state
 }
@@ -101,7 +112,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 
 	// Your code here.
-	ch := make(chan GetStateReply)
+	ch := make(chan getStateReply)
 	rf.recvGetState <- ch
 	reply := <-ch
 	term = reply.term
@@ -165,7 +176,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(req RequestVoteReq, reply *RequestVoteReply) {
 	// Your code here.
 	replyCh := make(chan RequestVoteReply)
-	rf.recvRequestVoteReq <- RequestVoteReqAndReplyChan{req, replyCh}
+	rf.recvRequestVoteReq <- requestVoteReqAndReplyChan{req, replyCh}
 	*reply = <-replyCh
 }
 
@@ -196,9 +207,10 @@ func (rf *Raft) sendRequestVote(server int, req RequestVoteReq, reply *RequestVo
 type AppendEntriesReq struct {
 	Term int
 	LeaderId int
-	//PrevLogIndex int
-	//PrevLogTerm int
-	//LeaderCommit int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []interface{}
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -209,7 +221,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
 	//DPrintf("%d AppendEntries\n", rf.me)
 	replyCh := make(chan AppendEntriesReply)
-	rf.recvAppendEntriesReq <- AppendEntriesReqAndReplyChan{req, replyCh}
+	rf.recvAppendEntriesReq <- appendEntriesReqAndReplyChan{req, replyCh}
 	*reply = <-replyCh
 }
 
@@ -218,15 +230,15 @@ func (rf *Raft) sendAppendEntries(server int, req AppendEntriesReq, reply *Appen
 	return ok
 }
 
-type StartReply struct {
+type startReply struct {
 	index int
 	term int
 	isLeader bool
 }
 
-type StartReqAndReplyChan struct {
+type startReqAndReplyChan struct {
 	command interface{}
-	ch chan StartReply
+	ch chan startReply
 }
 
 //
@@ -243,8 +255,8 @@ type StartReqAndReplyChan struct {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	replyCh := make(chan StartReply)
-	rf.recvStartReq <- StartReqAndReplyChan{command, replyCh}
+	replyCh := make(chan startReply)
+	rf.recvStartReq <- startReqAndReplyChan{command, replyCh}
 	reply := <-replyCh
 
 	index := reply.index
@@ -264,7 +276,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-func (rf *Raft) handleRequestVoteReq(rc RequestVoteReqAndReplyChan) bool {
+func (rf *Raft) handleRequestVoteReq(rc requestVoteReqAndReplyChan) bool {
 	req := rc.req
 	ch := rc.ch
 	reply := RequestVoteReply{}
@@ -294,7 +306,7 @@ func (rf *Raft) handleRequestVoteReq(rc RequestVoteReqAndReplyChan) bool {
 	return suppressed
 }
 
-func (rf *Raft) handleAppendEntriesReq(rc AppendEntriesReqAndReplyChan) bool {
+func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 	req := rc.req
 	ch := rc.ch
 	reply := AppendEntriesReply{}
@@ -334,10 +346,10 @@ func (rf *Raft) runAsFollower() {
 	for {
 		select {
 		case ch := <-rf.recvGetState:
-			ch <- GetStateReply{rf.currentTerm, rf.state}
+			ch <- getStateReply{rf.currentTerm, rf.state}
 
 		case rc := <-rf.recvStartReq:
-			rc.ch <- StartReply{0, rf.currentTerm, false}
+			rc.ch <- startReply{-1, rf.currentTerm, false}
 
 		case rc := <-rf.recvRequestVoteReq:
 			rf.handleRequestVoteReq(rc)
@@ -395,10 +407,10 @@ func (rf *Raft) runAsCandidate() {
 	for {
 		select {
 		case ch := <-rf.recvGetState:
-			ch <- GetStateReply{rf.currentTerm, rf.state}
+			ch <- getStateReply{rf.currentTerm, rf.state}
 
 		case rc := <-rf.recvStartReq:
-			rc.ch <- StartReply{0, rf.currentTerm, false}
+			rc.ch <- startReply{-1, rf.currentTerm, false}
 
 		case rc := <-rf.recvRequestVoteReq:
 			suppressed := rf.handleRequestVoteReq(rc)
@@ -446,38 +458,60 @@ func (rf *Raft) runAsCandidate() {
 	}
 }
 
+func (rf *Raft) sendAppendEntriesToFollowers(req AppendEntriesReq) {
+	n := len(rf.peers)
+	for i := 0; i < n; i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(pi int) {
+			reply := AppendEntriesReply{}
+			ok := rf.sendAppendEntries(pi, req, &reply)
+			if !ok {
+				reply.Term = 0
+				reply.Success = false
+			}
+			rf.recvAppendEntriesReply <- reply
+		}(i)
+	}
+}
+
 func (rf *Raft) runAsLeader() {
 	n := len(rf.peers)
+	rf.nextIndex = make([]int, n)
+	rf.matchIndex = make([]int, n)
+	for i, _ := range rf.nextIndex {
+		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+	}
 
 	for { // every `leaderIdle` milliseconds
-		req := AppendEntriesReq{
-			rf.currentTerm, rf.me,
+		var prevLogIndex int
+		var prevLogTerm int
+		var req AppendEntriesReq
+
+		prevLogIndex = len(rf.log) - 1
+		if prevLogIndex != -1 {
+			prevLogTerm = rf.log[prevLogIndex].term
+		} else {
+			prevLogTerm = 0
 		}
-		for i := 0; i < n; i++ {
-			if i == rf.me {
-				continue
-			}
-			go func(pi int) {
-				reply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(pi, req, &reply)
-				if !ok {
-					reply.Term = 0
-					reply.Success = false
-				}
-				rf.recvAppendEntriesReply <- reply
-			}(i)
+		req = AppendEntriesReq{
+			rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]interface{}, 0), rf.commitIndex,
 		}
+		rf.sendAppendEntriesToFollowers(req)
 
 		waitUntil := time.Now().Add(leaderIdle * time.Millisecond)
 		WAIT_DONE:
 		for {
 			select {
 			case ch := <-rf.recvGetState:
-				ch <- GetStateReply{rf.currentTerm, rf.state}
+				ch <- getStateReply{rf.currentTerm, rf.state}
 
 			case rc := <-rf.recvStartReq:
-				// TODO
-				rc.ch <- StartReply{0, rf.currentTerm, false}
+				index := len(rf.log)
+				rc.ch <- startReply{index, rf.currentTerm, true}
+				rf.log = append(rf.log, logEntry{rc.command, rf.currentTerm})
 
 			case rc := <-rf.recvRequestVoteReq:
 				suppressed := rf.handleRequestVoteReq(rc)
@@ -549,14 +583,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.recvRequestVoteReq = make(chan requestVoteReqAndReplyChan)
+	rf.recvRequestVoteReply = make(chan RequestVoteReply)
+	rf.recvAppendEntriesReq = make(chan appendEntriesReqAndReplyChan)
+	rf.recvAppendEntriesReply = make(chan AppendEntriesReply)
+	rf.recvGetState = make(chan chan getStateReply)
+	rf.recvStartReq = make(chan startReqAndReplyChan)
+	rf.applyCh = applyCh
+
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.recvRequestVoteReq = make(chan RequestVoteReqAndReplyChan)
-	rf.recvRequestVoteReply = make(chan RequestVoteReply)
-	rf.recvAppendEntriesReq = make(chan AppendEntriesReqAndReplyChan)
-	rf.recvAppendEntriesReply = make(chan AppendEntriesReply)
-	rf.recvGetState = make(chan chan GetStateReply)
-	rf.recvStartReq = make(chan StartReqAndReplyChan)
+	rf.log = make([]logEntry, 0)
+	rf.commitIndex = -1
+	rf.lastApplied = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
