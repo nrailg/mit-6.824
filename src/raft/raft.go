@@ -63,9 +63,9 @@ type appendEntriesReqAndReplyChan struct {
 	ch chan AppendEntriesReply
 }
 
-type logEntry struct {
-	command interface{}
-	term int
+type LogEntry struct {
+	Command interface{}
+	Term int
 }
 
 //
@@ -93,7 +93,7 @@ type Raft struct {
 
 	currentTerm int
 	votedFor int
-	log []logEntry
+	log []LogEntry
 	commitIndex int
 	lastApplied int
 	nextIndex []int
@@ -198,7 +198,6 @@ func (rf *Raft) RequestVote(req RequestVoteReq, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, req RequestVoteReq, reply *RequestVoteReply) bool {
-	//DPrintf("%d sendRequestVote to %d\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", req, reply)
 	return ok
 }
@@ -209,17 +208,17 @@ type AppendEntriesReq struct {
 	LeaderId int
 	PrevLogIndex int
 	PrevLogTerm int
-	Entries []interface{}
+	Entries []LogEntry
 	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	Me int
 }
 
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
-	//DPrintf("%d AppendEntries\n", rf.me)
 	replyCh := make(chan AppendEntriesReply)
 	rf.recvAppendEntriesReq <- appendEntriesReqAndReplyChan{req, replyCh}
 	*reply = <-replyCh
@@ -276,6 +275,20 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) upToDate(lastLogIndex int, lastLogTerm int) bool {
+	myLastLogIndex := len(rf.log) - 1
+	var myLastLogTerm int
+	if myLastLogIndex == -1 { // maybe more assertions
+		myLastLogTerm = 0
+	} else {
+		myLastLogTerm = rf.log[myLastLogIndex].Term
+	}
+	if myLastLogTerm < lastLogTerm {
+		return true
+	}
+	return myLastLogIndex <= lastLogIndex
+}
+
 func (rf *Raft) handleRequestVoteReq(rc requestVoteReqAndReplyChan) bool {
 	req := rc.req
 	ch := rc.ch
@@ -288,7 +301,8 @@ func (rf *Raft) handleRequestVoteReq(rc requestVoteReqAndReplyChan) bool {
 
 	} else if req.Term == rf.currentTerm {
 		reply.Term = rf.currentTerm
-		if rf.votedFor == -1 || rf.votedFor == req.CandidateId {
+
+		if rf.upToDate(req.LastLogIndex, req.LastLogTerm) && (rf.votedFor == -1 || rf.votedFor == req.CandidateId) {
 			rf.votedFor = req.CandidateId
 			reply.VoteGranted = true
 		} else {
@@ -297,19 +311,53 @@ func (rf *Raft) handleRequestVoteReq(rc requestVoteReqAndReplyChan) bool {
 
 	} else {
 		rf.currentTerm = req.Term
-		rf.votedFor = req.CandidateId
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = true
+
+		if rf.upToDate(req.LastLogIndex, req.LastLogTerm) {
+			rf.votedFor = req.CandidateId
+			reply.VoteGranted = true
+		} else {
+			rf.votedFor = -1
+			reply.VoteGranted = false
+		}
 		suppressed = true
 	}
 	ch <- reply
 	return suppressed
 }
 
+func (rf *Raft) checkPrevLogEntry(prevLogIndex int, prevLogTerm int) bool {
+	if prevLogIndex < -1 {
+		panic("prevLogIndex < -1")
+	}
+	if prevLogIndex == -1 {
+		return true
+	}
+	if prevLogIndex >= len(rf.log) {
+		return false
+	}
+	return rf.log[prevLogIndex].Term == prevLogTerm
+}
+
+func (rf *Raft) appendEntriesToLocal(prevLogIndex int, entries []LogEntry) {
+	for i := 0; i < len(entries); i++ {
+		j := prevLogIndex + 1 + i
+		if j < len(rf.log) {
+			if rf.log[j].Term != entries[i].Term {
+				rf.log = rf.log[:j]
+				rf.log = append(rf.log, entries[i])
+			}
+		} else {
+			rf.log = append(rf.log, entries[i])
+		}
+	}
+}
+
 func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 	req := rc.req
 	ch := rc.ch
 	reply := AppendEntriesReply{}
+	reply.Me = rf.me
 	suppressed := false
 
 	if req.Term < rf.currentTerm {
@@ -317,19 +365,60 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 		reply.Success = false
 
 	} else if req.Term == rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = true
 		suppressed = true
+		reply.Term = rf.currentTerm
+
+		if rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
+			reply.Success = false
+		} else {
+			reply.Success = true
+			rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
+		}
 
 	} else {
+		suppressed = true
 		rf.currentTerm = req.Term
 		rf.votedFor = -1
 		reply.Term = rf.currentTerm
-		reply.Success = true
-		suppressed = true
+
+		if rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
+			reply.Success = false
+		} else {
+			reply.Success = true
+			rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
+		}
 	}
+
+	if req.LeaderCommit > rf.commitIndex {
+		if len(rf.log) - 1 < req.LeaderCommit {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = req.LeaderCommit
+		}
+	}
+
 	ch <- reply
 	return suppressed
+}
+
+func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) bool {
+	if reply.Term < rf.currentTerm {
+		return false
+
+	} else if reply.Term == rf.currentTerm {
+		if reply.Success {
+		} else {
+		}
+		return false
+
+	} else {
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		if reply.Success {
+		} else {
+		}
+		return true
+	}
 }
 
 func (rf *Raft) handleUnexpectedReply(Term int) bool {
@@ -366,7 +455,6 @@ func (rf *Raft) runAsFollower() {
 			rf.handleUnexpectedReply(reply.Term)
 
 		case <- time.After(waitUntil.Sub(time.Now())):
-			//DPrintf("node %d turn candidate\n", rf.me)
 			rf.state = eCandidate
 			return
 		}
@@ -383,16 +471,23 @@ func (rf *Raft) runAsCandidate() {
 		return
 	}
 
+	lastLogIndex := len(rf.log) - 1
+	var lastLogTerm int
+	if lastLogIndex == -1 { // maybe more assertions
+		lastLogTerm = 0
+	} else {
+		lastLogTerm = rf.log[lastLogIndex].Term
+	}
 	req := RequestVoteReq{
-		rf.currentTerm, rf.me, 0, 0, // TODO
+		rf.currentTerm, rf.me, lastLogIndex, lastLogTerm,
 	}
 	for i := 0; i < n; i++ {
 		if i == rf.me {
 			continue
 		}
-		go func(pi int) {
+		go func(i1 int) {
 			reply := RequestVoteReply{}
-			ok := rf.sendRequestVote(pi, req, &reply)
+			ok := rf.sendRequestVote(i1, req, &reply)
 			if !ok {
 				reply.Term = 0
 				reply.VoteGranted = false
@@ -425,8 +520,7 @@ func (rf *Raft) runAsCandidate() {
 				rf.votedFor = -1
 				rf.state = eFollower
 				return
-
-			} else if reply.Term == rf.currentTerm {
+			} else {
 				if reply.VoteGranted {
 					vote++
 					if vote == quorum {
@@ -458,21 +552,64 @@ func (rf *Raft) runAsCandidate() {
 	}
 }
 
-func (rf *Raft) sendAppendEntriesToFollowers(req AppendEntriesReq) {
+func (rf *Raft) sendHeartbeat() {
 	n := len(rf.peers)
 	for i := 0; i < n; i++ {
 		if i == rf.me {
 			continue
 		}
-		go func(pi int) {
+		prevLogIndex := rf.nextIndex[i] - 1
+		prevLogTerm := 0
+		if prevLogIndex >= 0 {
+			prevLogTerm = rf.log[prevLogIndex].Term
+		}
+		req := AppendEntriesReq{
+			rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]LogEntry, 0), rf.commitIndex,
+		}
+		go func(i1 int, req1 AppendEntriesReq) {
 			reply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(pi, req, &reply)
+			ok := rf.sendAppendEntries(i1, req1, &reply)
 			if !ok {
 				reply.Term = 0
 				reply.Success = false
+				reply.Me = i1
 			}
 			rf.recvAppendEntriesReply <- reply
-		}(i)
+		}(i, req)
+	}
+}
+
+func (rf *Raft) sendAppendEntriesIfNecessary() {
+	n := len(rf.peers)
+	for i := 0; i < n; i++ {
+		if i == rf.me {
+			continue
+		}
+		if len(rf.log) >= rf.nextIndex[i] {
+			prevLogIndex := rf.nextIndex[i] - 1
+			if prevLogIndex < 0 {
+				panic("prevLogIndex < 0")
+			}
+			prevLogTerm := rf.log[prevLogIndex].Term
+			nEntries := len(rf.log) - rf.nextIndex[i]
+			entries := make([]LogEntry, nEntries)
+			si := rf.nextIndex[i]
+			sj := si + nEntries
+			copy(entries, rf.log[si:sj])
+			req := AppendEntriesReq{
+				rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex,
+			}
+			go func(i1 int, req1 AppendEntriesReq) {
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(i1, req1, &reply)
+				if !ok {
+					reply.Term = 0
+					reply.Success = false
+					reply.Me = i1
+				}
+				rf.recvAppendEntriesReply <- reply
+			}(i, req)
+		}
 	}
 }
 
@@ -480,26 +617,13 @@ func (rf *Raft) runAsLeader() {
 	n := len(rf.peers)
 	rf.nextIndex = make([]int, n)
 	rf.matchIndex = make([]int, n)
-	for i, _ := range rf.nextIndex {
+	for i := 0; i < n; i++ {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
 
 	for { // every `leaderIdle` milliseconds
-		var prevLogIndex int
-		var prevLogTerm int
-		var req AppendEntriesReq
-
-		prevLogIndex = len(rf.log) - 1
-		if prevLogIndex != -1 {
-			prevLogTerm = rf.log[prevLogIndex].term
-		} else {
-			prevLogTerm = 0
-		}
-		req = AppendEntriesReq{
-			rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]interface{}, 0), rf.commitIndex,
-		}
-		rf.sendAppendEntriesToFollowers(req)
+		rf.sendHeartbeat()
 
 		waitUntil := time.Now().Add(leaderIdle * time.Millisecond)
 		WAIT_DONE:
@@ -511,7 +635,8 @@ func (rf *Raft) runAsLeader() {
 			case rc := <-rf.recvStartReq:
 				index := len(rf.log)
 				rc.ch <- startReply{index, rf.currentTerm, true}
-				rf.log = append(rf.log, logEntry{rc.command, rf.currentTerm})
+				rf.log = append(rf.log, LogEntry{rc.command, rf.currentTerm})
+				rf.sendAppendEntriesIfNecessary()
 
 			case rc := <-rf.recvRequestVoteReq:
 				suppressed := rf.handleRequestVoteReq(rc)
@@ -535,11 +660,12 @@ func (rf *Raft) runAsLeader() {
 				}
 
 			case reply := <-rf.recvAppendEntriesReply:
-				suppressed := rf.handleUnexpectedReply(reply.Term)
+				suppressed := rf.handleAppendEntriesReply(reply)
 				if suppressed {
 					rf.state = eFollower
 					return
 				}
+				//rf.sendAppendEntriesIfNecessary()
 
 			case <- time.After(waitUntil.Sub(time.Now())):
 				break WAIT_DONE
@@ -593,7 +719,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = make([]logEntry, 0)
+	rf.log = make([]LogEntry, 0)
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 
