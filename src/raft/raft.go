@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -28,6 +29,7 @@ import (
 // import "encoding/gob"
 
 type state int
+type AppendEntriesError int
 
 const (
 	eFollower state = iota
@@ -36,9 +38,16 @@ const (
 )
 
 const (
+	eAppendEntriesOk AppendEntriesError = iota
+	eAppendEntriesErr
+	eAppendEntriesLessTerm
+	eAppendEntriesLogInconsistent
+)
+
+const (
 	electionTimeoutMin = 150
 	electionTimeoutMax = 300
-	leaderIdle = 50
+	leaderIdle = 10
 )
 
 //
@@ -202,7 +211,6 @@ func (rf *Raft) sendRequestVote(server int, req RequestVoteReq, reply *RequestVo
 	return ok
 }
 
-
 type AppendEntriesReq struct {
 	Term int
 	LeaderId int
@@ -214,8 +222,9 @@ type AppendEntriesReq struct {
 
 type AppendEntriesReply struct {
 	Term int
-	Success bool
-	Me int
+	Success AppendEntriesError
+	me int
+	req AppendEntriesReq
 }
 
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
@@ -357,21 +366,20 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 	req := rc.req
 	ch := rc.ch
 	reply := AppendEntriesReply{}
-	reply.Me = rf.me
 	suppressed := false
 
 	if req.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		reply.Success = false
+		reply.Success = eAppendEntriesLessTerm
 
 	} else if req.Term == rf.currentTerm {
 		suppressed = true
 		reply.Term = rf.currentTerm
 
-		if rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
-			reply.Success = false
+		if !rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
+			reply.Success = eAppendEntriesLogInconsistent
 		} else {
-			reply.Success = true
+			reply.Success = eAppendEntriesOk
 			rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
 		}
 
@@ -381,10 +389,10 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 		rf.votedFor = -1
 		reply.Term = rf.currentTerm
 
-		if rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
-			reply.Success = false
+		if !rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
+			reply.Success = eAppendEntriesLogInconsistent
 		} else {
-			reply.Success = true
+			reply.Success = eAppendEntriesOk
 			rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
 		}
 	}
@@ -401,22 +409,39 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 	return suppressed
 }
 
+func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
+	req := reply.req
+	peer := reply.me
+
+	if reply.Success == eAppendEntriesOk {
+		// TODO out of order?
+		nAppended := len(req.Entries)
+		rf.nextIndex[peer] = req.PrevLogIndex + nAppended + 1
+		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+
+	} else if reply.Success == eAppendEntriesLogInconsistent {
+		rf.nextIndex[peer] -= 1
+
+	} else {
+		panic("reply.Success is invalid")
+	}
+}
+
 func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) bool {
 	if reply.Term < rf.currentTerm {
+		// actually should not be here, confusing, bad.
 		return false
 
 	} else if reply.Term == rf.currentTerm {
-		if reply.Success {
-		} else {
-		}
+		rf.updateNextIndexAndMatchIndex(reply)
 		return false
 
 	} else {
+		if reply.Success != eAppendEntriesLessTerm {
+			panic("reply.Success != eAppendEntriesLessTerm")
+		}
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
-		if reply.Success {
-		} else {
-		}
 		return true
 	}
 }
@@ -571,9 +596,10 @@ func (rf *Raft) sendHeartbeat() {
 			ok := rf.sendAppendEntries(i1, req1, &reply)
 			if !ok {
 				reply.Term = 0
-				reply.Success = false
-				reply.Me = i1
+				reply.Success = eAppendEntriesErr
 			}
+			reply.me = i1
+			reply.req = req1
 			rf.recvAppendEntriesReply <- reply
 		}(i, req)
 	}
@@ -585,10 +611,10 @@ func (rf *Raft) sendAppendEntriesIfNecessary() {
 		if i == rf.me {
 			continue
 		}
-		if len(rf.log) >= rf.nextIndex[i] {
+		if len(rf.log) > rf.nextIndex[i] {
 			prevLogIndex := rf.nextIndex[i] - 1
 			if prevLogIndex < 0 {
-				panic("prevLogIndex < 0")
+				panic(fmt.Sprintf("prevLogIndex[%d] < 0", i))
 			}
 			prevLogTerm := rf.log[prevLogIndex].Term
 			nEntries := len(rf.log) - rf.nextIndex[i]
@@ -604,9 +630,10 @@ func (rf *Raft) sendAppendEntriesIfNecessary() {
 				ok := rf.sendAppendEntries(i1, req1, &reply)
 				if !ok {
 					reply.Term = 0
-					reply.Success = false
-					reply.Me = i1
+					reply.Success = eAppendEntriesErr
 				}
+				reply.me = i1
+				reply.req = req1
 				rf.recvAppendEntriesReply <- reply
 			}(i, req)
 		}
@@ -619,7 +646,7 @@ func (rf *Raft) runAsLeader() {
 	rf.matchIndex = make([]int, n)
 	for i := 0; i < n; i++ {
 		rf.nextIndex[i] = len(rf.log)
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = -1
 	}
 
 	for { // every `leaderIdle` milliseconds
@@ -665,7 +692,7 @@ func (rf *Raft) runAsLeader() {
 					rf.state = eFollower
 					return
 				}
-				//rf.sendAppendEntriesIfNecessary()
+				rf.sendAppendEntriesIfNecessary()
 
 			case <- time.After(waitUntil.Sub(time.Now())):
 				break WAIT_DONE
