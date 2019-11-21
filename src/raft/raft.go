@@ -38,16 +38,16 @@ const (
 )
 
 const (
-	eAppendEntriesOk AppendEntriesError = iota
-	eAppendEntriesErr
-	eAppendEntriesLessTerm
-	eAppendEntriesLogInconsistent
+	eAppendEntriesOk AppendEntriesError = 1
+	eAppendEntriesErr = 2
+	eAppendEntriesLessTerm = 3
+	eAppendEntriesLogInconsistent = 4
 )
 
 const (
 	electionTimeoutMin = 150
 	electionTimeoutMax = 300
-	leaderIdle = 10
+	leaderIdle = 50
 )
 
 //
@@ -377,10 +377,12 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 		reply.Term = rf.currentTerm
 
 		if !rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
+			//DPrintf("inconsistent")
 			reply.Success = eAppendEntriesLogInconsistent
 		} else {
 			reply.Success = eAppendEntriesOk
 			rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
+			//DPrintf("ok req.Entries = %v, rf.log = %v", req.Entries, rf.log)
 		}
 
 	} else {
@@ -404,6 +406,7 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 			rf.commitIndex = req.LeaderCommit
 		}
 	}
+	rf.applyIfPossible()
 
 	ch <- reply
 	return suppressed
@@ -427,13 +430,44 @@ func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
 	}
 }
 
+func (rf *Raft) updateCommitIndex() {
+	n := len(rf.peers)
+	maj := n / 2 + 1
+	for nci := rf.commitIndex + 1; nci < len(rf.log); nci++ {
+		cnt := 1
+		for i := 0; i < n; i++ {
+			if i == rf.me {
+				continue
+			}
+			if rf.matchIndex[i] >= nci {
+				cnt++
+			}
+		}
+		if cnt >= maj && rf.log[nci].Term == rf.currentTerm {
+			rf.commitIndex = nci
+		}
+	}
+}
+
+func (rf *Raft) applyIfPossible() {
+	//DPrintf("lastApplied = %d, commitIndex = %d", rf.lastApplied, rf.commitIndex)
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		applyMsg := ApplyMsg{i + 1, rf.log[i].Command, false, nil}
+		rf.applyCh <- applyMsg
+	}
+	rf.lastApplied = rf.commitIndex
+}
+
 func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) bool {
 	if reply.Term < rf.currentTerm {
 		// actually should not be here, confusing, bad.
 		return false
 
 	} else if reply.Term == rf.currentTerm {
+		//DPrintf("raft[%d] recv from raft[%d]: term = %d, prevLogIndex = %d, entries = %v, success = %v", rf.me, reply.me, reply.Term, reply.req.PrevLogIndex, reply.req.Entries, reply.Success)
 		rf.updateNextIndexAndMatchIndex(reply)
+		rf.updateCommitIndex()
+		rf.applyIfPossible()
 		return false
 
 	} else {
@@ -613,10 +647,13 @@ func (rf *Raft) sendAppendEntriesIfNecessary() {
 		}
 		if len(rf.log) > rf.nextIndex[i] {
 			prevLogIndex := rf.nextIndex[i] - 1
-			if prevLogIndex < 0 {
-				panic(fmt.Sprintf("prevLogIndex[%d] < 0", i))
+			if prevLogIndex < -1 {
+				panic(fmt.Sprintf("prevLogIndex[%d] < -1", i))
 			}
-			prevLogTerm := rf.log[prevLogIndex].Term
+			prevLogTerm := 0
+			if prevLogIndex >= 0 {
+				prevLogTerm = rf.log[prevLogIndex].Term
+			}
 			nEntries := len(rf.log) - rf.nextIndex[i]
 			entries := make([]LogEntry, nEntries)
 			si := rf.nextIndex[i]
@@ -625,6 +662,7 @@ func (rf *Raft) sendAppendEntriesIfNecessary() {
 			req := AppendEntriesReq{
 				rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex,
 			}
+			//DPrintf("raft[%d] send index %d cmd %v to raft[%d]", rf.me, prevLogIndex + 1, entries, i)
 			go func(i1 int, req1 AppendEntriesReq) {
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(i1, req1, &reply)
@@ -634,6 +672,7 @@ func (rf *Raft) sendAppendEntriesIfNecessary() {
 				}
 				reply.me = i1
 				reply.req = req1
+				//DPrintf("raft[%d] recv from %v raft[%d]", rf.me, reply.Success, i1)
 				rf.recvAppendEntriesReply <- reply
 			}(i, req)
 		}
@@ -660,8 +699,9 @@ func (rf *Raft) runAsLeader() {
 				ch <- getStateReply{rf.currentTerm, rf.state}
 
 			case rc := <-rf.recvStartReq:
+				//DPrintf("raft[%d] recv start req as leader", rf.me)
 				index := len(rf.log)
-				rc.ch <- startReply{index, rf.currentTerm, true}
+				rc.ch <- startReply{index + 1, rf.currentTerm, true}
 				rf.log = append(rf.log, LogEntry{rc.command, rf.currentTerm})
 				rf.sendAppendEntriesIfNecessary()
 
