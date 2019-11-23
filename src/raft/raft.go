@@ -38,16 +38,16 @@ const (
 )
 
 const (
-	eAppendEntriesOk AppendEntriesError = 1
-	eAppendEntriesErr = 2
-	eAppendEntriesLessTerm = 3
-	eAppendEntriesLogInconsistent = 4
+	eAppendEntriesOk              AppendEntriesError = 1
+	eAppendEntriesErr                                = 2
+	eAppendEntriesLessTerm                           = 3
+	eAppendEntriesLogInconsistent                    = 4
 )
 
 const (
 	electionTimeoutMin = 150
 	electionTimeoutMax = 300
-	leaderIdle = 50
+	leaderIdle         = 50
 )
 
 //
@@ -64,24 +64,24 @@ type ApplyMsg struct {
 
 type requestVoteReqAndReplyChan struct {
 	req RequestVoteReq
-	ch chan RequestVoteReply
+	ch  chan RequestVoteReply
 }
 
 type appendEntriesReqAndReplyChan struct {
 	req AppendEntriesReq
-	ch chan AppendEntriesReply
+	ch  chan AppendEntriesReply
 }
 
 type LogEntry struct {
 	Command interface{}
-	Term int
+	Term    int
 }
 
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mtx     sync.Mutex
+	mtx       sync.Mutex
 	peers     []*labrpc.ClientEnd
 	persister *Persister
 	me        int // index into peers[]
@@ -90,27 +90,27 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	electionTimeout time.Duration
-	state state
-	recvRequestVoteReq chan requestVoteReqAndReplyChan
-	recvRequestVoteReply chan RequestVoteReply
-	recvAppendEntriesReq chan appendEntriesReqAndReplyChan
+	electionTimeout        time.Duration
+	state                  state
+	recvRequestVoteReq     chan requestVoteReqAndReplyChan
+	recvRequestVoteReply   chan RequestVoteReply
+	recvAppendEntriesReq   chan appendEntriesReqAndReplyChan
 	recvAppendEntriesReply chan AppendEntriesReply
-	recvGetState chan chan getStateReply
-	recvStartReq chan startReqAndReplyChan
-	applyCh chan ApplyMsg
+	recvGetState           chan chan getStateReply
+	recvStartReq           chan startReqAndReplyChan
+	applyCh                chan ApplyMsg
 
 	currentTerm int
-	votedFor int
-	log []LogEntry
+	votedFor    int
+	log         []LogEntry
 	commitIndex int
 	lastApplied int
-	nextIndex []int
-	matchIndex []int
+	nextIndex   []int
+	matchIndex  []int
 }
 
-type getStateReply struct{
-	term int
+type getStateReply struct {
+	term  int
 	state state
 }
 
@@ -158,16 +158,15 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.yyy)
 }
 
-
 //
 // example RequestVote RPC arguments structure.
 //
 type RequestVoteReq struct {
 	// Your data here.
-	Term int
-	CandidateId int
+	Term         int
+	CandidateId  int
 	LastLogIndex int
-	LastLogTerm int
+	LastLogTerm  int
 }
 
 //
@@ -175,7 +174,7 @@ type RequestVoteReq struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
-	Term int
+	Term        int
 	VoteGranted bool
 }
 
@@ -212,19 +211,19 @@ func (rf *Raft) sendRequestVote(server int, req RequestVoteReq, reply *RequestVo
 }
 
 type AppendEntriesReq struct {
-	Term int
-	LeaderId int
+	Term         int
+	LeaderId     int
 	PrevLogIndex int
-	PrevLogTerm int
-	Entries []LogEntry
+	PrevLogTerm  int
+	Entries      []LogEntry
 	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	Term int
+	Term    int
 	Success AppendEntriesError
-	me int
-	req AppendEntriesReq
+	me      int
+	req     AppendEntriesReq
 }
 
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
@@ -239,14 +238,14 @@ func (rf *Raft) sendAppendEntries(server int, req AppendEntriesReq, reply *Appen
 }
 
 type startReply struct {
-	index int
-	term int
+	index    int
+	term     int
 	isLeader bool
 }
 
 type startReqAndReplyChan struct {
 	command interface{}
-	ch chan startReply
+	ch      chan startReply
 }
 
 //
@@ -400,7 +399,7 @@ func (rf *Raft) handleAppendEntriesReq(rc appendEntriesReqAndReplyChan) bool {
 	}
 
 	if req.LeaderCommit > rf.commitIndex {
-		if len(rf.log) - 1 < req.LeaderCommit {
+		if len(rf.log)-1 < req.LeaderCommit {
 			rf.commitIndex = len(rf.log) - 1
 		} else {
 			rf.commitIndex = req.LeaderCommit
@@ -426,13 +425,13 @@ func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
 		rf.nextIndex[peer] -= 1
 
 	} else {
-		panic("reply.Success is invalid")
+		// DPrintf("rf[%d].updateNextIndexAndMatchIndex: reply = %v", rf.me, reply)
 	}
 }
 
 func (rf *Raft) updateCommitIndex() {
 	n := len(rf.peers)
-	maj := n / 2 + 1
+	maj := n/2 + 1
 	for nci := rf.commitIndex + 1; nci < len(rf.log); nci++ {
 		cnt := 1
 		for i := 0; i < n; i++ {
@@ -513,7 +512,7 @@ func (rf *Raft) runAsFollower() {
 		case reply := <-rf.recvAppendEntriesReply:
 			rf.handleUnexpectedReply(reply.Term)
 
-		case <- time.After(waitUntil.Sub(time.Now())):
+		case <-time.After(waitUntil.Sub(time.Now())):
 			rf.state = eCandidate
 			return
 		}
@@ -557,7 +556,7 @@ func (rf *Raft) runAsCandidate() {
 
 	waitUntil := time.Now().Add(rf.electionTimeout)
 	vote := 1
-	quorum := n / 2 + 1
+	quorum := n/2 + 1
 	for {
 		select {
 		case ch := <-rf.recvGetState:
@@ -605,7 +604,7 @@ func (rf *Raft) runAsCandidate() {
 				return
 			}
 
-		case <- time.After(waitUntil.Sub(time.Now())):
+		case <-time.After(waitUntil.Sub(time.Now())):
 			return
 		}
 	}
@@ -692,7 +691,7 @@ func (rf *Raft) runAsLeader() {
 		rf.sendHeartbeat()
 
 		waitUntil := time.Now().Add(leaderIdle * time.Millisecond)
-		WAIT_DONE:
+	WAIT_DONE:
 		for {
 			select {
 			case ch := <-rf.recvGetState:
@@ -734,7 +733,7 @@ func (rf *Raft) runAsLeader() {
 				}
 				rf.sendAppendEntriesIfNecessary()
 
-			case <- time.After(waitUntil.Sub(time.Now())):
+			case <-time.After(waitUntil.Sub(time.Now())):
 				break WAIT_DONE
 			}
 		}
@@ -744,7 +743,7 @@ func (rf *Raft) runAsLeader() {
 func (rf *Raft) run() {
 	for {
 		a, b := electionTimeoutMin, electionTimeoutMax
-		rf.electionTimeout = time.Duration((rand.Intn(b - a) + a)) * time.Millisecond
+		rf.electionTimeout = time.Duration((rand.Intn(b-a) + a)) * time.Millisecond
 
 		switch rf.state {
 		case eFollower:
