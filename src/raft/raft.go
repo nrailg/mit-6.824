@@ -81,6 +81,12 @@ func newOutLink(reqs map[int]interface{}) outLink {
 	}
 }
 
+func newOutLinkWithReplyCh(reqs map[int]interface{}, replyCh chan interface{}) outLink {
+	return outLink{
+		reqs, replyCh, make(chan struct{}),
+	}
+}
+
 func (link *outLink) ignoreReplies() {
 	close(link.ignoreRepliesCh)
 }
@@ -104,6 +110,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	state     state
 	killed    chan struct{}
+	applyCh   chan ApplyMsg
 	inLinkCh  chan inLink
 	outLinkCh chan outLink
 
@@ -126,7 +133,6 @@ type getStateReply struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	// TODO make it timed
 	link := newInLink(getStateReq{})
 	select {
 	case <-rf.killed:
@@ -282,6 +288,16 @@ func (rf *Raft) handleRequestVoteReq(link inLink) (reply RequestVoteReply, suppr
 	return
 }
 
+type startReq struct {
+	command interface{}
+}
+
+type startReply struct {
+	index    int
+	term     int
+	isLeader bool
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -296,11 +312,20 @@ func (rf *Raft) handleRequestVoteReq(link inLink) (reply RequestVoteReply, suppr
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	link := newInLink(startReq{command})
+	select {
+	case <-rf.killed:
+		panic("killed")
+	case rf.inLinkCh <- link:
+	}
 
-	return index, term, isLeader
+	select {
+	case <-rf.killed:
+		panic("killed")
+	case iReply := <-link.replyCh:
+		reply := iReply.(startReply)
+		return reply.index, reply.term, reply.isLeader
+	}
 }
 
 type AppendEntriesReq struct {
@@ -341,6 +366,38 @@ func (rf *Raft) sendAppendEntries(server int, req AppendEntriesReq, reply *Appen
 	return ok
 }
 
+func (rf *Raft) checkPrevLogEntry(prevLogIndex int, prevLogTerm int) bool {
+	if prevLogIndex < -1 {
+		panic("prevLogIndex < -1")
+	}
+	if prevLogIndex == -1 {
+		return true
+	}
+	if prevLogIndex >= len(rf.log) {
+		return false
+	}
+	return rf.log[prevLogIndex].Term == prevLogTerm
+}
+
+func (rf *Raft) appendEntriesToLocal(prevLogIndex int, entries []LogEntry) int {
+	for i := 0; i < len(entries); i++ {
+		j := prevLogIndex + 1 + i
+		if j < len(rf.log) {
+			if rf.log[j].Term != entries[i].Term {
+				rf.log = rf.log[:j]
+				rf.log = append(rf.log, entries[i])
+			} else {
+				if rf.log[j].Command != entries[i].Command {
+					panic("same index and term but different command")
+				}
+			}
+		} else {
+			rf.log = append(rf.log, entries[i])
+		}
+	}
+	return prevLogIndex + len(entries)
+}
+
 func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, suppressed bool) {
 	req := link.req.(AppendEntriesReq)
 	reply = AppendEntriesReply{}
@@ -359,22 +416,21 @@ func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, s
 			rf.votedFor = -1
 			reply.Term = rf.currentTerm
 		}
-		reply.Success = eAppendEntriesOk // tmp
 
-		//if !rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
-		//	reply.Success = eAppendEntriesLogInconsistent
-		//} else {
-		//	reply.Success = eAppendEntriesOk
-		//	lastNewEntry := rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
-		//	if req.LeaderCommit > rf.commitIndex {
-		//		if lastNewEntry < req.LeaderCommit {
-		//			rf.commitIndex = lastNewEntry
-		//		} else {
-		//			rf.commitIndex = req.LeaderCommit
-		//		}
-		//	}
-		//	rf.applyIfPossible()
-		//}
+		if !rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
+			reply.Success = eAppendEntriesLogInconsistent
+		} else {
+			reply.Success = eAppendEntriesOk
+			lastNewEntry := rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
+			if req.LeaderCommit > rf.commitIndex {
+				if lastNewEntry < req.LeaderCommit {
+					rf.commitIndex = lastNewEntry
+				} else {
+					rf.commitIndex = req.LeaderCommit
+				}
+			}
+			rf.applyIfPossible()
+		}
 	}
 	return
 }
@@ -429,6 +485,9 @@ func (rf *Raft) sendRequests() {
 
 				case AppendEntriesReq:
 					go func(i1 int, req AppendEntriesReq) {
+						if len(req.Entries) > 0 {
+							DPrintf("raft[%d] to raft[%d] send %+v", rf.me, i1, req)
+						}
 						reply := AppendEntriesReply{}
 						ok := rf.sendAppendEntries(i1, req, &reply)
 						if !ok {
@@ -492,10 +551,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.state = eFollower
 	rf.killed = make(chan struct{})
+	rf.applyCh = applyCh
 	rf.inLinkCh = make(chan inLink)
 	rf.outLinkCh = make(chan outLink)
-	rf.state = eFollower
 
 	rf.currentTerm = 0
 	rf.votedFor = -1

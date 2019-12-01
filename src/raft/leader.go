@@ -9,9 +9,8 @@ const (
 	leaderIdle = 50
 )
 
-func (rf *Raft) sendHeartbeats() outLink {
-	//DPrintf("raft[%d] sendHeartbeats", rf.me)
-
+func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
+	//DPrintf("raft[%d] sendHeartbeatToPeers", rf.me)
 	n := len(rf.peers)
 	reqs := make(map[int]interface{})
 	for i := 0; i < n; i++ {
@@ -28,23 +27,107 @@ func (rf *Raft) sendHeartbeats() outLink {
 		}
 		reqs[i] = req
 	}
-	outLink := newOutLink(reqs)
+	olink := newOutLinkWithReplyCh(reqs, prevOutLink.replyCh)
 	select {
 	case <-rf.killed:
-		panic("unexpected")
-	case rf.outLinkCh <- outLink:
+		panic("killed")
+	case rf.outLinkCh <- olink:
 	}
-	return outLink
+	return olink
+}
+
+func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
+	n := len(rf.peers)
+	reqs := make(map[int]interface{})
+	for i := 0; i < n; i++ {
+		if i == rf.me {
+			continue
+		}
+		if len(rf.log) > rf.nextIndex[i] {
+			prevLogIndex := rf.nextIndex[i] - 1
+			if prevLogIndex < -1 {
+				panic(fmt.Sprintf("prevLogIndex[%d] < -1", i))
+			}
+			prevLogTerm := 0
+			if prevLogIndex >= 0 {
+				prevLogTerm = rf.log[prevLogIndex].Term
+			}
+			nEntries := len(rf.log) - rf.nextIndex[i]
+			entries := make([]LogEntry, nEntries)
+			si := rf.nextIndex[i]
+			sj := si + nEntries
+			copy(entries, rf.log[si:sj])
+			req := AppendEntriesReq{
+				rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex,
+			}
+			reqs[i] = req
+		}
+	}
+	olink := newOutLinkWithReplyCh(reqs, prevOutLink.replyCh)
+	select {
+	case <-rf.killed:
+		panic("killed")
+	case rf.outLinkCh <- olink:
+	}
+	return olink
+}
+
+func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
+	req := reply.req
+	peer := reply.me
+
+	if reply.Success == eAppendEntriesOk {
+		nAppended := len(req.Entries)
+		rf.nextIndex[peer] = req.PrevLogIndex + nAppended + 1
+		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+
+	} else if reply.Success == eAppendEntriesLogInconsistent {
+		// TODO more carefully
+		if rf.nextIndex[peer] > req.PrevLogIndex {
+			rf.nextIndex[peer] = req.PrevLogIndex
+		}
+
+	} else {
+		//DPrintf("rf[%d].updateNextIndexAndMatchIndex: reply = %v", rf.me, reply)
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	n := len(rf.peers)
+	maj := n/2 + 1
+	for nci := rf.commitIndex + 1; nci < len(rf.log); nci++ {
+		cnt := 1
+		for i := 0; i < n; i++ {
+			if i == rf.me {
+				continue
+			}
+			if rf.matchIndex[i] >= nci {
+				cnt++
+			}
+		}
+		if cnt >= maj && rf.log[nci].Term == rf.currentTerm {
+			rf.commitIndex = nci
+		}
+	}
+}
+
+func (rf *Raft) applyIfPossible() {
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		applyMsg := ApplyMsg{i + 1, rf.log[i].Command, false, nil}
+		//DPrintf("raft[%d] apply %+v", rf.me, applyMsg)
+		rf.applyCh <- applyMsg
+	}
+	rf.lastApplied = rf.commitIndex
 }
 
 func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) (suppressed bool) {
 	if reply.Term < rf.currentTerm {
-		// actually should not be here, confusing, bad.
+		// TODO actually should not be here, confusing, bad.
 		return false
 	} else if reply.Term == rf.currentTerm {
-		//rf.updateNextIndexAndMatchIndex(reply)
-		//rf.updateCommitIndex()
-		//rf.applyIfPossible()
+		rf.updateNextIndexAndMatchIndex(reply)
+		rf.updateCommitIndex()
+		rf.applyIfPossible()
 		return false
 	} else {
 		if reply.Success != eAppendEntriesLessTerm {
@@ -67,8 +150,10 @@ func (rf *Raft) runAsLeader() {
 		rf.matchIndex[i] = -1
 	}
 
-	outLink := rf.sendHeartbeats()
-	defer outLink.ignoreReplies()
+	// TODO use only 1 replyCh, don't ignore any longer.
+	olink := newOutLink(make(map[int]interface{}))
+	olink = rf.sendHeartbeatToPeers(olink)
+	defer olink.ignoreReplies()
 
 	ticker := time.NewTicker(time.Duration(leaderIdle) * time.Millisecond)
 	defer ticker.Stop()
@@ -76,23 +161,23 @@ func (rf *Raft) runAsLeader() {
 	for {
 		select {
 		case <-rf.killed:
-			panic("unexpected")
+			panic("killed")
 
 		case <-ticker.C: // time for next heartbeat
-			outLink.ignoreReplies()
-			outLink = rf.sendHeartbeats()
+			olink = rf.sendHeartbeatToPeers(olink)
 
-		case iReply := <-outLink.replyCh:
+		case iReply := <-olink.replyCh:
 			reply := iReply.(AppendEntriesReply)
 			suppressed := rf.handleAppendEntriesReply(reply)
 			if suppressed {
 				rf.state = eFollower
 				return
 			}
+			olink = rf.sendAppendEntriesToPeers(olink)
 
-		case inLink := <-rf.inLinkCh:
-			//DPrintf("raft[%d](leader) inLink %+v", rf.me, inLink)
-			req := inLink.req
+		case ilink := <-rf.inLinkCh:
+			//DPrintf("raft[%d](leader) ilink %+v", rf.me, ilink)
+			req := ilink.req
 
 			switch req.(type) {
 			case killReq:
@@ -103,15 +188,26 @@ func (rf *Raft) runAsLeader() {
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- getStateReply{rf.currentTerm, true}:
+				case ilink.replyCh <- getStateReply{rf.currentTerm, true}:
 				}
 
-			case RequestVoteReq:
-				reply, suppressed := rf.handleRequestVoteReq(inLink)
+			case startReq:
+				reply := startReply{len(rf.log), rf.currentTerm, true}
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- reply:
+				case ilink.replyCh <- reply:
+				}
+				sreq := req.(startReq)
+				rf.log = append(rf.log, LogEntry{sreq.command, rf.currentTerm})
+				olink = rf.sendAppendEntriesToPeers(olink)
+
+			case RequestVoteReq:
+				reply, suppressed := rf.handleRequestVoteReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
 				}
 				if suppressed {
 					rf.state = eFollower
@@ -119,11 +215,11 @@ func (rf *Raft) runAsLeader() {
 				}
 
 			case AppendEntriesReq:
-				reply, suppressed := rf.handleAppendEntriesReq(inLink)
+				reply, suppressed := rf.handleAppendEntriesReq(ilink)
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- reply:
+				case ilink.replyCh <- reply:
 				}
 				if suppressed {
 					rf.state = eFollower
@@ -131,7 +227,6 @@ func (rf *Raft) runAsLeader() {
 				}
 
 			default:
-				// TODO panic with details
 				panic(fmt.Sprintf("unknown req = %+v", req))
 			}
 		}

@@ -15,14 +15,14 @@ func (rf *Raft) _runAsFollower() {
 	for {
 		select {
 		case <-rf.killed:
-			panic("unexpected")
+			panic("killed")
 
 		case <-timer.C:
 			rf.state = eCandidate
 			return
 
-		case inLink := <-rf.inLinkCh:
-			req := inLink.req
+		case ilink := <-rf.inLinkCh:
+			req := ilink.req
 			switch req.(type) {
 			case killReq:
 				close(rf.killed)
@@ -32,23 +32,30 @@ func (rf *Raft) _runAsFollower() {
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- getStateReply{rf.currentTerm, false}:
+				case ilink.replyCh <- getStateReply{rf.currentTerm, false}:
+				}
+
+			case startReq:
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- startReply{-1, rf.currentTerm, false}:
 				}
 
 			case RequestVoteReq:
-				reply, _ := rf.handleRequestVoteReq(inLink)
+				reply, _ := rf.handleRequestVoteReq(ilink)
 				select {
 				case <-rf.killed:
-				case inLink.replyCh <- reply:
+				case ilink.replyCh <- reply:
 				}
 				//DPrintf("raft[%d] suppressed by RequestVoteReq", rf.me)
 				return
 
 			case AppendEntriesReq:
-				reply, _ := rf.handleAppendEntriesReq(inLink)
+				reply, _ := rf.handleAppendEntriesReq(ilink)
 				select {
 				case <-rf.killed:
-				case inLink.replyCh <- reply:
+				case ilink.replyCh <- reply:
 				}
 				//DPrintf("raft[%d] suppressed by AppendEntriesReq", rf.me)
 				return

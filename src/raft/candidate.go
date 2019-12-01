@@ -6,19 +6,8 @@ import (
 	"time"
 )
 
-func (rf *Raft) runAsCandidate() {
-	// DPrintf("raft[%d] runAsCandidate", rf.me)
-
-	rf.currentTerm++
-	rf.votedFor = rf.me
-
+func (rf *Raft) sendRequestVoteToPeers() outLink {
 	n := len(rf.peers)
-	if n == 1 {
-		rf.state = eLeader
-		return
-	}
-
-	// send RequestVote to peers
 	lastLogIndex := len(rf.log) - 1
 	var lastLogTerm int
 	if lastLogIndex == -1 {
@@ -36,13 +25,30 @@ func (rf *Raft) runAsCandidate() {
 		}
 		reqs[i] = req
 	}
-	outLink := newOutLink(reqs)
-	defer outLink.ignoreReplies()
+	olink := newOutLink(reqs)
 	select {
 	case <-rf.killed:
 		panic("killed")
-	case rf.outLinkCh <- outLink:
+	case rf.outLinkCh <- olink:
 	}
+	return olink
+}
+
+func (rf *Raft) runAsCandidate() {
+	// DPrintf("raft[%d] runAsCandidate", rf.me)
+
+	rf.currentTerm++
+	rf.votedFor = rf.me
+
+	n := len(rf.peers)
+	if n == 1 {
+		rf.state = eLeader
+		return
+	}
+
+	// send RequestVote to peers
+	olink := rf.sendRequestVoteToPeers()
+	defer olink.ignoreReplies()
 
 	a, b := electionTimeoutMin, electionTimeoutMax
 	electionTimeout := time.Duration((rand.Intn(b-a) + a)) * time.Millisecond
@@ -59,7 +65,7 @@ func (rf *Raft) runAsCandidate() {
 		case <-timer.C:
 			return
 
-		case iReply := <-outLink.replyCh:
+		case iReply := <-olink.replyCh: // handleRequestVoteReply
 			reply := iReply.(RequestVoteReply)
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
@@ -77,8 +83,8 @@ func (rf *Raft) runAsCandidate() {
 				}
 			}
 
-		case inLink := <-rf.inLinkCh:
-			req := inLink.req
+		case ilink := <-rf.inLinkCh:
+			req := ilink.req
 
 			switch req.(type) {
 			case killReq:
@@ -89,15 +95,22 @@ func (rf *Raft) runAsCandidate() {
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- getStateReply{rf.currentTerm, false}:
+				case ilink.replyCh <- getStateReply{rf.currentTerm, false}:
 				}
 
-			case RequestVoteReq:
-				reply, suppressed := rf.handleRequestVoteReq(inLink)
+			case startReq:
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- reply:
+				case ilink.replyCh <- startReply{-1, rf.currentTerm, false}:
+				}
+
+			case RequestVoteReq:
+				reply, suppressed := rf.handleRequestVoteReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
 				}
 				if suppressed {
 					rf.state = eFollower
@@ -105,11 +118,11 @@ func (rf *Raft) runAsCandidate() {
 				}
 
 			case AppendEntriesReq:
-				reply, suppressed := rf.handleAppendEntriesReq(inLink)
+				reply, suppressed := rf.handleAppendEntriesReq(ilink)
 				select {
 				case <-rf.killed:
 					return
-				case inLink.replyCh <- reply:
+				case ilink.replyCh <- reply:
 				}
 				if suppressed {
 					rf.state = eFollower
