@@ -192,7 +192,8 @@ func (rf *Raft) runAsLeader() {
 				}
 
 			case startReq:
-				reply := startReply{len(rf.log), rf.currentTerm, true}
+				// len(rf.log) + 1, since the test cases start index at 1 (other than 0).
+				reply := startReply{len(rf.log) + 1, rf.currentTerm, true}
 				select {
 				case <-rf.killed:
 					return
