@@ -6,7 +6,8 @@ import (
 )
 
 const (
-	leaderIdle = 50
+	leaderIdle            = 50
+	appendEntriesInterval = 100 // in millisecond
 )
 
 func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
@@ -36,6 +37,10 @@ func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
 	return olink
 }
 
+func tryAnotherAppendEntries(lastTime time.Time) bool {
+	return time.Since(lastTime).Milliseconds() > appendEntriesInterval
+}
+
 func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
 	n := len(rf.peers)
 	reqs := make(map[int]interface{})
@@ -44,6 +49,12 @@ func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
 			continue
 		}
 		if len(rf.log) > rf.nextIndex[i] {
+			// avoid broadcasting storm
+			if !tryAnotherAppendEntries(rf.appendEntriesJustSent[i]) {
+				continue
+			}
+			rf.appendEntriesJustSent[i] = time.Now()
+
 			prevLogIndex := rf.nextIndex[i] - 1
 			if prevLogIndex < -1 {
 				panic(fmt.Sprintf("prevLogIndex[%d] < -1", i))
@@ -80,11 +91,13 @@ func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
 		nAppended := len(req.Entries)
 		rf.nextIndex[peer] = req.PrevLogIndex + nAppended + 1
 		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+		rf.appendEntriesJustSent[peer] = time.Time{}
 
 	} else if reply.Success == eAppendEntriesLogInconsistent {
 		// TODO more carefully
 		if rf.nextIndex[peer] > req.PrevLogIndex {
 			rf.nextIndex[peer] = req.PrevLogIndex
+			rf.appendEntriesJustSent[peer] = time.Time{}
 		}
 
 	} else {
@@ -149,6 +162,8 @@ func (rf *Raft) runAsLeader() {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = -1
 	}
+
+	rf.appendEntriesJustSent = make([]time.Time, n)
 
 	// TODO use only 1 replyCh, don't ignore any longer.
 	olink := newOutLink(make(map[int]interface{}))

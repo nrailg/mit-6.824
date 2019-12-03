@@ -20,6 +20,7 @@ package raft
 import (
 	"labrpc"
 	"sync"
+	"time"
 )
 
 // import "bytes"
@@ -108,11 +109,12 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state     state
-	killed    chan struct{}
-	applyCh   chan ApplyMsg
-	inLinkCh  chan inLink
-	outLinkCh chan outLink
+	state                 state
+	killed                chan struct{}
+	applyCh               chan ApplyMsg
+	inLinkCh              chan inLink
+	outLinkCh             chan outLink
+	appendEntriesJustSent []time.Time
 
 	currentTerm int
 	votedFor    int
