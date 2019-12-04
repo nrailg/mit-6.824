@@ -76,13 +76,7 @@ type outLink struct {
 	ignoreRepliesCh chan struct{}
 }
 
-func newOutLink(reqs map[int]interface{}) outLink {
-	return outLink{
-		reqs, make(chan interface{}), make(chan struct{}),
-	}
-}
-
-func newOutLinkWithReplyCh(reqs map[int]interface{}, replyCh chan interface{}) outLink {
+func newOutLink(reqs map[int]interface{}, replyCh chan interface{}) outLink {
 	return outLink{
 		reqs, replyCh, make(chan struct{}),
 	}
@@ -465,8 +459,6 @@ func (rf *Raft) sendRequests() {
 			return
 
 		case link := <-rf.outLinkCh:
-			// TODO control concurrency
-			// TODO early termination before `Call`
 			// DPrintf("raft[%d] sendRequests outLink = %+v", rf.me, link)
 			for peer, iReq := range link.reqs {
 				switch iReq.(type) {

@@ -25,7 +25,7 @@ func (rf *Raft) sendRequestVoteToPeers() outLink {
 		}
 		reqs[i] = req
 	}
-	olink := newOutLink(reqs)
+	olink := newOutLink(reqs, make(chan interface{}))
 	select {
 	case <-rf.killed:
 		panic("killed")

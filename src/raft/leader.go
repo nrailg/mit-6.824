@@ -28,7 +28,7 @@ func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
 		}
 		reqs[i] = req
 	}
-	olink := newOutLinkWithReplyCh(reqs, prevOutLink.replyCh)
+	olink := newOutLink(reqs, prevOutLink.replyCh)
 	select {
 	case <-rf.killed:
 		panic("killed")
@@ -74,7 +74,7 @@ func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
 			reqs[i] = req
 		}
 	}
-	olink := newOutLinkWithReplyCh(reqs, prevOutLink.replyCh)
+	olink := newOutLink(reqs, prevOutLink.replyCh)
 	select {
 	case <-rf.killed:
 		panic("killed")
@@ -165,8 +165,7 @@ func (rf *Raft) runAsLeader() {
 
 	rf.appendEntriesJustSent = make([]time.Time, n)
 
-	// TODO use only 1 replyCh, don't ignore any longer.
-	olink := newOutLink(make(map[int]interface{}))
+	olink := newOutLink(make(map[int]interface{}), make(chan interface{}))
 	olink = rf.sendHeartbeatToPeers(olink)
 	defer olink.ignoreReplies()
 
