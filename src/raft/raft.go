@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labrpc"
 	"sync"
 	"time"
@@ -159,6 +161,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -171,6 +181,12 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 //
@@ -263,6 +279,7 @@ func (rf *Raft) handleRequestVoteReq(link inLink) (reply RequestVoteReply, suppr
 
 		if rf.upToDate(req.LastLogIndex, req.LastLogTerm) && (rf.votedFor == -1 || rf.votedFor == req.CandidateId) {
 			rf.votedFor = req.CandidateId
+			rf.persist()
 			reply.VoteGranted = true
 		} else {
 			reply.VoteGranted = false
@@ -280,6 +297,7 @@ func (rf *Raft) handleRequestVoteReq(link inLink) (reply RequestVoteReply, suppr
 			reply.VoteGranted = false
 		}
 		suppressed = true
+		rf.persist()
 	}
 	return
 }
@@ -391,6 +409,7 @@ func (rf *Raft) appendEntriesToLocal(prevLogIndex int, entries []LogEntry) int {
 			rf.log = append(rf.log, entries[i])
 		}
 	}
+	rf.persist()
 	return prevLogIndex + len(entries)
 }
 
@@ -410,6 +429,7 @@ func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, s
 		} else {
 			rf.currentTerm = req.Term
 			rf.votedFor = -1
+			rf.persist()
 			reply.Term = rf.currentTerm
 		}
 

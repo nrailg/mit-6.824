@@ -148,6 +148,7 @@ func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) (suppressed b
 		}
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
+		rf.persist()
 		return true
 	}
 }
@@ -215,6 +216,7 @@ func (rf *Raft) runAsLeader() {
 				}
 				sreq := req.(startReq)
 				rf.log = append(rf.log, LogEntry{sreq.command, rf.currentTerm})
+				rf.persist()
 				olink = rf.sendAppendEntriesToPeers(olink)
 
 			case RequestVoteReq:

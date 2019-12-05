@@ -13,7 +13,7 @@ import "sync"
 
 type Persister struct {
 	mtx       sync.Mutex
-	raftstate []byte
+	raftState []byte
 	snapshot  []byte
 }
 
@@ -25,7 +25,7 @@ func (ps *Persister) Copy() *Persister {
 	ps.mtx.Lock()
 	defer ps.mtx.Unlock()
 	np := MakePersister()
-	np.raftstate = ps.raftstate
+	np.raftState = ps.raftState
 	np.snapshot = ps.snapshot
 	return np
 }
@@ -33,19 +33,19 @@ func (ps *Persister) Copy() *Persister {
 func (ps *Persister) SaveRaftState(data []byte) {
 	ps.mtx.Lock()
 	defer ps.mtx.Unlock()
-	ps.raftstate = data
+	ps.raftState = data
 }
 
 func (ps *Persister) ReadRaftState() []byte {
 	ps.mtx.Lock()
 	defer ps.mtx.Unlock()
-	return ps.raftstate
+	return ps.raftState
 }
 
 func (ps *Persister) RaftStateSize() int {
 	ps.mtx.Lock()
 	defer ps.mtx.Unlock()
-	return len(ps.raftstate)
+	return len(ps.raftState)
 }
 
 func (ps *Persister) SaveSnapshot(snapshot []byte) {

@@ -39,6 +39,7 @@ func (rf *Raft) runAsCandidate() {
 
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 
 	n := len(rf.peers)
 	if n == 1 {
@@ -70,6 +71,7 @@ func (rf *Raft) runAsCandidate() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
+				rf.persist()
 				rf.state = eFollower
 				return
 			} else {
