@@ -19,6 +19,9 @@ func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
 			continue
 		}
 		prevLogIndex := rf.nextIndex[i] - 1
+		if prevLogIndex < -1 {
+			panic(fmt.Sprintf("prevLogIndex[%d] < -1", i))
+		}
 		prevLogTerm := 0
 		if prevLogIndex >= 0 {
 			prevLogTerm = rf.log[prevLogIndex].Term
@@ -94,9 +97,11 @@ func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
 		rf.appendEntriesJustSent[peer] = time.Time{}
 
 	} else if reply.Success == eAppendEntriesLogInconsistent {
-		// TODO more carefully
 		if rf.nextIndex[peer] > req.PrevLogIndex {
-			rf.nextIndex[peer] = req.PrevLogIndex
+			if reply.ConflictFirst < 0 {
+				panic(fmt.Sprintf("reply.ConflictFirst(=%d) < 0", reply.ConflictFirst))
+			}
+			rf.nextIndex[peer] = reply.ConflictFirst
 			rf.appendEntriesJustSent[peer] = time.Time{}
 		}
 

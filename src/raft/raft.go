@@ -134,13 +134,13 @@ func (rf *Raft) GetState() (int, bool) {
 	link := newInLink(getStateReq{})
 	select {
 	case <-rf.killed:
-		panic("killed")
+		return 0, false
 	case rf.inLinkCh <- link:
 	}
 
 	select {
 	case <-rf.killed:
-		panic("killed")
+		return 0, false
 	case iReply := <-link.replyCh:
 		reply := iReply.(getStateReply)
 		return reply.term, reply.isLeader
@@ -329,13 +329,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	link := newInLink(startReq{command})
 	select {
 	case <-rf.killed:
-		panic("killed")
+		return -1, 0, false
 	case rf.inLinkCh <- link:
 	}
 
 	select {
 	case <-rf.killed:
-		panic("killed")
+		return -1, 0, false
 	case iReply := <-link.replyCh:
 		reply := iReply.(startReply)
 		return reply.index, reply.term, reply.isLeader
@@ -352,10 +352,11 @@ type AppendEntriesReq struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success AppendEntriesError
-	me      int
-	req     AppendEntriesReq
+	Term          int
+	Success       AppendEntriesError
+	ConflictFirst int
+	me            int
+	req           AppendEntriesReq
 }
 
 func (rf *Raft) AppendEntries(req AppendEntriesReq, reply *AppendEntriesReply) {
@@ -435,6 +436,22 @@ func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, s
 
 		if !rf.checkPrevLogEntry(req.PrevLogIndex, req.PrevLogTerm) {
 			reply.Success = eAppendEntriesLogInconsistent
+
+			var cf int
+			if req.PrevLogIndex < len(rf.log) {
+				cf = req.PrevLogIndex
+			} else {
+				cf = len(rf.log) - 1
+			}
+			if cf < 0 {
+				cf = 0
+			} else {
+				ct := rf.log[cf].Term
+				for cf > 0 && rf.log[cf-1].Term == ct {
+					cf -= 1
+				}
+			}
+			reply.ConflictFirst = cf
 		} else {
 			reply.Success = eAppendEntriesOk
 			lastNewEntry := rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
@@ -466,7 +483,7 @@ func (rf *Raft) Kill() {
 	link := newInLink(killReq{})
 	select {
 	case <-rf.killed:
-		panic("killed")
+		return // wtf
 	case rf.inLinkCh <- link:
 	}
 	<-rf.killed
@@ -527,6 +544,7 @@ func (rf *Raft) run() {
 	for {
 		select {
 		case <-rf.killed:
+			close(rf.applyCh)
 			return
 		default:
 		}
