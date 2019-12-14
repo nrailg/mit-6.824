@@ -4,6 +4,12 @@ import (
 	"crypto/rand"
 	"labrpc"
 	"math/big"
+	"time"
+)
+
+const (
+	noLeaderSleepTime = 100 * time.Millisecond
+	noLeaderRetries   = 10
 )
 
 type Clerk struct {
@@ -38,9 +44,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	n := len(ck.servers)
+	for {
+		for i := 0; i < n; i++ {
+			req := GetArgs{key}
+			reply := GetReply{}
+			ok := ck.servers[i].Call("RaftKV.Get", &req, &reply)
+			if !ok {
+				continue
+			}
+			if !reply.IsLeader {
+				continue
+			}
+			if reply.Err != OK {
+				return ""
+			}
+			return reply.Value
+		}
+		time.Sleep(noLeaderSleepTime)
+	}
 }
 
 //
@@ -55,11 +78,29 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	n := len(ck.servers)
+	for {
+		for i := 0; i < n; i++ {
+			req := PutAppendArgs{key, value, op}
+			//DPrintf("clerk req = %+v", req)
+			reply := PutAppendReply{}
+			ok := ck.servers[i].Call("RaftKV.PutAppend", &req, &reply)
+			if !ok {
+				continue
+			}
+			if !reply.IsLeader {
+				continue
+			}
+			return
+		}
+		time.Sleep(noLeaderSleepTime)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OpPut)
 }
+
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OpAppend)
 }
