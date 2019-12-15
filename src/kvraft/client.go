@@ -57,10 +57,13 @@ func (ck *Clerk) Get(key string) string {
 			if !reply.IsLeader {
 				continue
 			}
-			if reply.Err != OK {
+			if reply.Err == OK {
+				return reply.Value
+			} else if reply.Err == ErrNoKey {
 				return ""
+			} else {
+				continue
 			}
-			return reply.Value
 		}
 		time.Sleep(noLeaderSleepTime)
 	}
@@ -82,7 +85,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		for i := 0; i < n; i++ {
 			req := PutAppendArgs{key, value, op}
-			//DPrintf("clerk req = %+v", req)
 			reply := PutAppendReply{}
 			ok := ck.servers[i].Call("RaftKV.PutAppend", &req, &reply)
 			if !ok {
@@ -91,7 +93,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			if !reply.IsLeader {
 				continue
 			}
-			return
+			if reply.Err == OK {
+				return
+			}
 		}
 		time.Sleep(noLeaderSleepTime)
 	}

@@ -43,8 +43,9 @@ type RaftKV struct {
 	maxRaftState int // snapshot if log grows this big
 
 	// Your definitions here.
+	cond        *sync.Cond
+	lastApplied int
 	kvs         map[string]string
-	commitIndex int
 }
 
 func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
@@ -61,9 +62,9 @@ func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 	reply.IsLeader = true
 	reply.Err = OK
 
-	kv.mtx.Lock()
+	kv.cond.L.Lock()
 	reply.Value = kv.kvs[req.Key]
-	kv.mtx.Unlock()
+	kv.cond.L.Unlock()
 }
 
 func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
@@ -73,26 +74,16 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 	if !isLeader {
 		reply.IsLeader = false
 		reply.Err = OK
-		//DPrintf("kv[%d] not leader", kv.me)
 		return
 	}
 	reply.IsLeader = true
 	reply.Err = OK
 
-	//DPrintf("kv[%d] PutAppend %+v", kv.me, req)
-	//DPrintf("kv[%d] wait commit", kv.me)
-	for {
-		kv.mtx.Lock()
-		ci := kv.commitIndex
-		kv.mtx.Unlock()
-		if ci >= index {
-			break
-		}
-		time.Sleep(PutAppendWaitCommit)
+	kv.cond.L.Lock()
+	for kv.lastApplied < index {
+		kv.cond.Wait()
 	}
-	//DPrintf("kv[%d] done commit", kv.me)
-	//DPrintf("kv.kvs[%s] = %s", req.Key, kv.kvs[req.Key])
-	return
+	kv.cond.L.Unlock()
 }
 
 //
@@ -111,27 +102,28 @@ func (kv *RaftKV) run() {
 		op := applyMsg.Command.(Op)
 		//DPrintf("kv[%d] apply %+v", kv.me, applyMsg)
 		if op.Op == OpPut {
-			kv.mtx.Lock()
+			kv.cond.L.Lock()
 			kv.kvs[op.Key] = op.Value
-			kv.mtx.Unlock()
+			kv.cond.L.Unlock()
 
 		} else if op.Op == OpAppend {
-			kv.mtx.Lock()
+			kv.cond.L.Lock()
 			kv.kvs[op.Key] += op.Value
-			kv.mtx.Unlock()
+			kv.cond.L.Unlock()
 
 		} else {
 			panic(fmt.Sprintf("unknown op = %s", op))
 		}
 
-		if applyMsg.Index <= kv.commitIndex {
-			panic("applyMsg.Index <= kv.commitIndex")
+		kv.cond.L.Lock()
+		//DPrintf("kv[%d] applyMsg.Index = %d, kv.lastApplied = %d", kv.me, applyMsg.Index, kv.lastApplied)
+		if applyMsg.Index <= kv.lastApplied {
+			panic("applyMsg.Index <= kv.lastApplied")
 		}
-		kv.mtx.Lock()
-		kv.commitIndex = applyMsg.Index
-		kv.mtx.Unlock()
+		kv.lastApplied = applyMsg.Index
+		kv.cond.Broadcast()
+		kv.cond.L.Unlock()
 	}
-	//DPrintf("kv[%d] run done", kv.me)
 }
 
 //
@@ -160,7 +152,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvs = make(map[string]string)
-	kv.commitIndex = 0
+	kv.lastApplied = 0
+	kv.cond = sync.NewCond(&kv.mtx)
 
 	go kv.run()
 	return kv

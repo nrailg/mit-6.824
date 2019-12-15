@@ -457,7 +457,9 @@ func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, s
 			lastNewEntry := rf.appendEntriesToLocal(req.PrevLogIndex, req.Entries)
 			if req.LeaderCommit > rf.commitIndex {
 				if lastNewEntry < req.LeaderCommit {
-					rf.commitIndex = lastNewEntry
+					if rf.commitIndex < lastNewEntry {
+						rf.commitIndex = lastNewEntry
+					}
 				} else {
 					rf.commitIndex = req.LeaderCommit
 				}
