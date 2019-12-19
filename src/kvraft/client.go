@@ -13,7 +13,8 @@ const (
 )
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	servers      []*labrpc.ClientEnd
+	recentLeader int
 	// You will have to modify this struct.
 }
 
@@ -28,6 +29,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.recentLeader = 0
 	return ck
 }
 
@@ -47,7 +49,9 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	n := len(ck.servers)
 	for {
-		for i := 0; i < n; i++ {
+		lastLeader := ck.recentLeader
+		for j := 0; j < n; j++ {
+			i := (lastLeader + j) % n
 			req := GetArgs{key}
 			reply := GetReply{}
 			ok := ck.servers[i].Call("RaftKV.Get", &req, &reply)
@@ -56,6 +60,8 @@ func (ck *Clerk) Get(key string) string {
 			}
 			if !reply.IsLeader {
 				continue
+			} else {
+				ck.recentLeader = i
 			}
 			if reply.Err == OK {
 				return reply.Value
@@ -83,7 +89,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	n := len(ck.servers)
 	for {
-		for i := 0; i < n; i++ {
+		lastLeader := ck.recentLeader
+		for j := 0; j < n; j++ {
+			i := (lastLeader + j) % n
 			req := PutAppendArgs{key, value, op}
 			reply := PutAppendReply{}
 			ok := ck.servers[i].Call("RaftKV.PutAppend", &req, &reply)

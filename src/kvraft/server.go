@@ -19,11 +19,21 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+var nxtReqId int = 0
+var reqIdMtx sync.Mutex
+
+func nextReqId() int {
+	reqIdMtx.Lock()
+	defer reqIdMtx.Unlock()
+	nxtReqId++
+	return nxtReqId
+}
+
 const (
 	OpGet               = "Get"
 	OpPut               = "Put"
 	OpAppend            = "Append"
-	PutAppendWaitCommit = 100 * time.Millisecond
+	PutAppendWaitCommit = 10 * time.Millisecond
 )
 
 type Op struct {
@@ -48,9 +58,20 @@ type RaftKV struct {
 	kvs         map[string]string
 }
 
+func (kv *RaftKV) Lock() {
+	//DPrintf("kv[%d] lock %d", kv.me, seq)
+	kv.cond.L.Lock()
+	//DPrintf("kv[%d] lock %d done", kv.me, seq)
+}
+
+func (kv *RaftKV) Unlock() {
+	//DPrintf("kv[%d] unlock %d", kv.me, seq)
+	kv.cond.L.Unlock()
+	//DPrintf("kv[%d] unlock %d done", kv.me, seq)
+}
+
 func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 	// Your code here.
-	//DPrintf("Get %+v", req)
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.IsLeader = false
@@ -58,13 +79,13 @@ func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 		reply.Value = ""
 		return
 	}
-	// TODO actually might already loses leadership
 	reply.IsLeader = true
 	reply.Err = OK
 
-	kv.cond.L.Lock()
+	// might already loses leadership here, we can only offer sequential consistency.
+	kv.Lock()
 	reply.Value = kv.kvs[req.Key]
-	kv.cond.L.Unlock()
+	kv.Unlock()
 }
 
 func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
@@ -76,14 +97,27 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = OK
 		return
 	}
+
+	// If the ex-leader is partitioned by itself, it won't know about new leaders; but any client in the same partition
+	// won't be able to talk to a new leader either, so it's OK in this case for the server and client to wait
+	// indefinitely until the partition heals.
+
+	kv.Lock()
+	defer kv.Unlock()
+	for kv.lastApplied < index {
+		kv.cond.Wait() // TODO new leader shall info this raft instance, if any.
+
+		kv.Unlock()
+		_, isLeader = kv.rf.GetState()
+		kv.Lock()
+		if !isLeader {
+			reply.IsLeader = false
+			reply.Err = OK
+			return
+		}
+	}
 	reply.IsLeader = true
 	reply.Err = OK
-
-	kv.cond.L.Lock()
-	for kv.lastApplied < index {
-		kv.cond.Wait()
-	}
-	kv.cond.L.Unlock()
 }
 
 //
@@ -102,27 +136,26 @@ func (kv *RaftKV) run() {
 		op := applyMsg.Command.(Op)
 		//DPrintf("kv[%d] apply %+v", kv.me, applyMsg)
 		if op.Op == OpPut {
-			kv.cond.L.Lock()
+			kv.Lock()
 			kv.kvs[op.Key] = op.Value
-			kv.cond.L.Unlock()
+			kv.Unlock()
 
 		} else if op.Op == OpAppend {
-			kv.cond.L.Lock()
+			kv.Lock()
 			kv.kvs[op.Key] += op.Value
-			kv.cond.L.Unlock()
+			kv.Unlock()
 
 		} else {
 			panic(fmt.Sprintf("unknown op = %s", op))
 		}
 
-		kv.cond.L.Lock()
-		//DPrintf("kv[%d] applyMsg.Index = %d, kv.lastApplied = %d", kv.me, applyMsg.Index, kv.lastApplied)
+		kv.Lock()
 		if applyMsg.Index <= kv.lastApplied {
 			panic("applyMsg.Index <= kv.lastApplied")
 		}
 		kv.lastApplied = applyMsg.Index
 		kv.cond.Broadcast()
-		kv.cond.L.Unlock()
+		kv.Unlock()
 	}
 }
 
@@ -149,11 +182,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxRaftState = maxRaftState
 
 	// Your initialization code here.
+	kv.cond = sync.NewCond(&kv.mtx)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.kvs = make(map[string]string)
 	kv.lastApplied = 0
-	kv.cond = sync.NewCond(&kv.mtx)
+	kv.kvs = make(map[string]string)
 
 	go kv.run()
 	return kv
