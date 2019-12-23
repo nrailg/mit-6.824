@@ -91,7 +91,7 @@ func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	cmd := Op{req.Op, req.Key, req.Value}
-	index, _, isLeader := kv.rf.Start(cmd)
+	index, curTerm, isLeader := kv.rf.Start(cmd)
 	if !isLeader {
 		reply.IsLeader = false
 		reply.Err = OK
@@ -102,22 +102,58 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 	// won't be able to talk to a new leader either, so it's OK in this case for the server and client to wait
 	// indefinitely until the partition heals.
 
-	kv.Lock()
-	defer kv.Unlock()
-	for kv.lastApplied < index {
-		kv.cond.Wait() // TODO new leader shall info this raft instance, if any.
+	onCommitDone := make(chan struct{})
+	onLoseLeadership := make(chan struct{})
 
-		kv.Unlock()
-		_, isLeader = kv.rf.GetState()
+	go func() {
 		kv.Lock()
-		if !isLeader {
+		defer kv.Unlock()
+	L1:
+		for kv.lastApplied < index {
+			kv.cond.Wait()
+			select {
+			case <-onLoseLeadership:
+				break L1
+			default:
+			}
+		}
+		close(onCommitDone)
+	}()
+
+	go func() {
+	L2:
+		for {
+			t := time.NewTimer(PutAppendWaitCommit)
+			select {
+			case <-t.C:
+			case <-onCommitDone:
+				t.Stop()
+				break L2
+			}
+			newTerm, isLeader := kv.rf.GetState()
+			if !isLeader || curTerm != newTerm {
+				close(onLoseLeadership)
+				kv.cond.Broadcast()
+				break L2
+			}
+		}
+	}()
+
+	// TODO still not sure whether it is `cmd` or not. need to check log entry term.
+	select {
+	case <-onLoseLeadership:
+		reply.IsLeader = false
+		reply.Err = OK
+	case <-onCommitDone:
+		ok, newTerm := kv.rf.GetLogEntryTerm(index)
+		if !ok || newTerm != curTerm {
 			reply.IsLeader = false
 			reply.Err = OK
-			return
+		} else {
+			reply.IsLeader = true
+			reply.Err = OK
 		}
 	}
-	reply.IsLeader = true
-	reply.Err = OK
 }
 
 //

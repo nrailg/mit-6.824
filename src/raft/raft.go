@@ -147,6 +147,41 @@ func (rf *Raft) GetState() (int, bool) {
 	}
 }
 
+type getLogEntryTermReq struct {
+	index int
+}
+
+type getLogEntryTermReply struct {
+	ok   bool
+	term int
+}
+
+func (rf *Raft) GetLogEntryTerm(index int) (bool, int) {
+	link := newInLink(getLogEntryTermReq{})
+	select {
+	case <-rf.killed:
+		return false, 0
+	case rf.inLinkCh <- link:
+	}
+
+	select {
+	case <-rf.killed:
+		return false, 0
+	case iReply := <-link.replyCh:
+		reply := iReply.(getLogEntryTermReply)
+		return reply.ok, reply.term
+	}
+}
+
+func (rf *Raft) handleGetLogEntryTermReq(link inLink) getLogEntryTermReply {
+	req := link.req.(getLogEntryTermReq)
+	if req.index >= len(rf.log) {
+		return getLogEntryTermReply{false, 0}
+	}
+	e := rf.log[req.index]
+	return getLogEntryTermReply{true, e.Term}
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.

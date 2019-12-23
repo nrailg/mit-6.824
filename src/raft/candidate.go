@@ -107,6 +107,14 @@ func (rf *Raft) runAsCandidate() {
 				case ilink.replyCh <- startReply{-1, rf.currentTerm, false}:
 				}
 
+			case getLogEntryTermReq:
+				reply := rf.handleGetLogEntryTermReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
+				}
+
 			case RequestVoteReq:
 				reply, suppressed := rf.handleRequestVoteReq(ilink)
 				select {

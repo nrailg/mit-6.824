@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"labrpc"
 	"math/big"
+	"sync"
 	"time"
 )
 
@@ -12,10 +13,21 @@ const (
 	noLeaderRetries   = 10
 )
 
+var nxtClerkId = 0
+var nxtClerkIdMtx sync.Mutex
+
+func getNextClerkId() int {
+	nxtClerkIdMtx.Lock()
+	defer nxtClerkIdMtx.Unlock()
+	nxtClerkId += 1
+	return nxtClerkId - 1
+}
+
 type Clerk struct {
-	servers      []*labrpc.ClientEnd
-	recentLeader int
+	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	me           int
+	recentLeader int
 }
 
 func nrand() int64 {
@@ -29,6 +41,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.me = getNextClerkId()
 	ck.recentLeader = 0
 	return ck
 }
