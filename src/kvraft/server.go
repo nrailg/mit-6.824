@@ -40,9 +40,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Op    string
-	Key   string
-	Value string
+	Op      string
+	Key     string
+	Value   string
+	ClerkId int
+	CmdId   int
 }
 
 type RaftKV struct {
@@ -56,6 +58,7 @@ type RaftKV struct {
 	cond        *sync.Cond
 	lastApplied int
 	kvs         map[string]string
+	cmdHistory  map[int]int
 }
 
 func (kv *RaftKV) Lock() {
@@ -90,7 +93,7 @@ func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 
 func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	cmd := Op{req.Op, req.Key, req.Value}
+	cmd := Op{req.Op, req.Key, req.Value, req.ClerkId, req.CmdId}
 	index, curTerm, isLeader := kv.rf.Start(cmd)
 	if !isLeader {
 		reply.IsLeader = false
@@ -171,18 +174,20 @@ func (kv *RaftKV) run() {
 	for applyMsg := range kv.applyCh {
 		op := applyMsg.Command.(Op)
 		//DPrintf("kv[%d] apply %+v", kv.me, applyMsg)
-		if op.Op == OpPut {
-			kv.Lock()
-			kv.kvs[op.Key] = op.Value
-			kv.Unlock()
+		if histCmdId, ok := kv.cmdHistory[op.ClerkId]; !ok || histCmdId < op.CmdId {
+			kv.cmdHistory[op.ClerkId] = op.CmdId
 
-		} else if op.Op == OpAppend {
-			kv.Lock()
-			kv.kvs[op.Key] += op.Value
-			kv.Unlock()
-
-		} else {
-			panic(fmt.Sprintf("unknown op = %s", op))
+			if op.Op == OpPut {
+				kv.Lock()
+				kv.kvs[op.Key] = op.Value
+				kv.Unlock()
+			} else if op.Op == OpAppend {
+				kv.Lock()
+				kv.kvs[op.Key] += op.Value
+				kv.Unlock()
+			} else {
+				panic(fmt.Sprintf("unknown op = %s", op.Op))
+			}
 		}
 
 		kv.Lock()
@@ -223,6 +228,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastApplied = 0
 	kv.kvs = make(map[string]string)
+	kv.cmdHistory = make(map[int]int)
 
 	go kv.run()
 	return kv

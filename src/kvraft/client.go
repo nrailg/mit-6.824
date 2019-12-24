@@ -13,21 +13,22 @@ const (
 	noLeaderRetries   = 10
 )
 
-var nxtClerkId = 0
-var nxtClerkIdMtx sync.Mutex
+var nextClerkId = 0
+var nextClerkIdMtx sync.Mutex
 
 func getNextClerkId() int {
-	nxtClerkIdMtx.Lock()
-	defer nxtClerkIdMtx.Unlock()
-	nxtClerkId += 1
-	return nxtClerkId - 1
+	nextClerkIdMtx.Lock()
+	defer nextClerkIdMtx.Unlock()
+	nextClerkId += 1
+	return nextClerkId
 }
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	me           int
-	recentLeader int
+	me            int
+	recentLeader  int
+	nextCommandId int
 }
 
 func nrand() int64 {
@@ -43,7 +44,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.me = getNextClerkId()
 	ck.recentLeader = 0
+	ck.nextCommandId = 0
 	return ck
+}
+
+func (ck *Clerk) getNextCommandId() int {
+	ck.nextCommandId += 1
+	return ck.nextCommandId
 }
 
 //
@@ -101,13 +108,15 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	n := len(ck.servers)
+	req := PutAppendArgs{key, value, op, ck.me, ck.getNextCommandId()}
 	for {
 		lastLeader := ck.recentLeader
 		for j := 0; j < n; j++ {
 			i := (lastLeader + j) % n
-			req := PutAppendArgs{key, value, op}
 			reply := PutAppendReply{}
+			//DPrintf("ck call kv[%d].PutAppend", i)
 			ok := ck.servers[i].Call("RaftKV.PutAppend", &req, &reply)
+			//DPrintf("ck call kv[%d].PutAppend, ok=%v, reply=%+v", i, ok, reply)
 			if !ok {
 				continue
 			}
