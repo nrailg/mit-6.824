@@ -73,32 +73,10 @@ func (kv *RaftKV) Unlock() {
 	//DPrintf("kv[%d] unlock %d done", kv.me, seq)
 }
 
-func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
-	// Your code here.
-	_, isLeader := kv.rf.GetState()
+func (kv *RaftKV) commitLogEntry(op Op) (index int, term int, isLeader bool) {
+	index, curTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		reply.IsLeader = false
-		reply.Err = OK
-		reply.Value = ""
-		return
-	}
-	reply.IsLeader = true
-	reply.Err = OK
-
-	// might already loses leadership here, we can only offer sequential consistency.
-	kv.Lock()
-	reply.Value = kv.kvs[req.Key]
-	kv.Unlock()
-}
-
-func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
-	cmd := Op{req.Op, req.Key, req.Value, req.ClerkId, req.CmdId}
-	index, curTerm, isLeader := kv.rf.Start(cmd)
-	if !isLeader {
-		reply.IsLeader = false
-		reply.Err = OK
-		return
+		return -1, curTerm, false
 	}
 
 	// If the ex-leader is partitioned by itself, it won't know about new leaders; but any client in the same partition
@@ -142,20 +120,54 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 		}
 	}()
 
-	// TODO still not sure whether it is `cmd` or not. need to check log entry term.
 	select {
 	case <-onLoseLeadership:
-		reply.IsLeader = false
-		reply.Err = OK
+		return -1, curTerm, false
 	case <-onCommitDone:
 		ok, newTerm := kv.rf.GetLogEntryTerm(index)
 		if !ok || newTerm != curTerm {
-			reply.IsLeader = false
-			reply.Err = OK
+			return -1, curTerm, false
 		} else {
-			reply.IsLeader = true
-			reply.Err = OK
+			return index, curTerm, true
 		}
+	}
+}
+
+func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
+	// Your code here.
+	op := Op{OpGet, req.Key, "", -1, -1}
+	_, _, isLeader := kv.commitLogEntry(op)
+	if !isLeader {
+		reply.IsLeader = false
+		reply.Err = ""
+		reply.Value = ""
+	} else {
+		reply.IsLeader = true
+		// we can only offer sequential consistency.
+		kv.Lock()
+		val, ok := kv.kvs[req.Key]
+		if ok {
+			reply.Err = OK
+			reply.Value = val
+		} else {
+			reply.Err = ErrNoKey
+			reply.Value = ""
+		}
+		kv.Unlock()
+	}
+}
+
+func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
+	// Your code here.
+	op := Op{req.Op, req.Key, req.Value, req.ClerkId, req.CmdId}
+	_, _, isLeader := kv.commitLogEntry(op)
+	//DPrintf("kv[%d] Start, index=%d, curTerm=%d, isLeader=%v", kv.me, index, curTerm, isLeader)
+	if !isLeader {
+		reply.IsLeader = false
+		reply.Err = ""
+	} else {
+		reply.IsLeader = true
+		reply.Err = OK
 	}
 }
 
@@ -177,7 +189,8 @@ func (kv *RaftKV) run() {
 		if histCmdId, ok := kv.cmdHistory[op.ClerkId]; !ok || histCmdId < op.CmdId {
 			kv.cmdHistory[op.ClerkId] = op.CmdId
 
-			if op.Op == OpPut {
+			if op.Op == OpGet {
+			} else if op.Op == OpPut {
 				kv.Lock()
 				kv.kvs[op.Key] = op.Value
 				kv.Unlock()

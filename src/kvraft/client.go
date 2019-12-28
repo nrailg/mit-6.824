@@ -114,9 +114,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		for j := 0; j < n; j++ {
 			i := (lastLeader + j) % n
 			reply := PutAppendReply{}
-			//DPrintf("ck call kv[%d].PutAppend", i)
 			ok := ck.servers[i].Call("RaftKV.PutAppend", &req, &reply)
-			//DPrintf("ck call kv[%d].PutAppend, ok=%v, reply=%+v", i, ok, reply)
+			//DPrintf("ck[%d] call kv[%d].PutAppend, ok=%v, reply=%+v", ck.me, i, ok, reply)
 			if !ok {
 				continue
 			}

@@ -157,7 +157,7 @@ type getLogEntryTermReply struct {
 }
 
 func (rf *Raft) GetLogEntryTerm(index int) (bool, int) {
-	link := newInLink(getLogEntryTermReq{})
+	link := newInLink(getLogEntryTermReq{index})
 	select {
 	case <-rf.killed:
 		return false, 0
@@ -175,10 +175,10 @@ func (rf *Raft) GetLogEntryTerm(index int) (bool, int) {
 
 func (rf *Raft) handleGetLogEntryTermReq(link inLink) getLogEntryTermReply {
 	req := link.req.(getLogEntryTermReq)
-	if req.index >= len(rf.log) {
+	if req.index > len(rf.log) {
 		return getLogEntryTermReply{false, 0}
 	}
-	e := rf.log[req.index]
+	e := rf.log[req.index-1]
 	return getLogEntryTermReply{true, e.Term}
 }
 
