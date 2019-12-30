@@ -62,15 +62,11 @@ type RaftKV struct {
 }
 
 func (kv *RaftKV) Lock() {
-	//DPrintf("kv[%d] lock %d", kv.me, seq)
 	kv.cond.L.Lock()
-	//DPrintf("kv[%d] lock %d done", kv.me, seq)
 }
 
 func (kv *RaftKV) Unlock() {
-	//DPrintf("kv[%d] unlock %d", kv.me, seq)
 	kv.cond.L.Unlock()
-	//DPrintf("kv[%d] unlock %d done", kv.me, seq)
 }
 
 func (kv *RaftKV) commitLogEntry(op Op) (index int, term int, isLeader bool) {
@@ -89,12 +85,11 @@ func (kv *RaftKV) commitLogEntry(op Op) (index int, term int, isLeader bool) {
 	go func() {
 		kv.Lock()
 		defer kv.Unlock()
-	L1:
 		for kv.lastApplied < index {
 			kv.cond.Wait()
 			select {
 			case <-onLoseLeadership:
-				break L1
+				return
 			default:
 			}
 		}
