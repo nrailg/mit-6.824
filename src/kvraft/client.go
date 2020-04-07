@@ -121,6 +121,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			}
 			if !reply.IsLeader {
 				continue
+			} else {
+				ck.recentLeader = i;
 			}
 			if reply.Err == OK {
 				return

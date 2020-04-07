@@ -97,7 +97,7 @@ func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
 		rf.appendEntriesJustSent[peer] = time.Time{}
 
 	} else if reply.Success == eAppendEntriesLogInconsistent {
-		if rf.nextIndex[peer] > req.PrevLogIndex {
+		if rf.nextIndex[peer] > reply.ConflictFirst {
 			if reply.ConflictFirst < 0 {
 				panic(fmt.Sprintf("reply.ConflictFirst(=%d) < 0", reply.ConflictFirst))
 			}
