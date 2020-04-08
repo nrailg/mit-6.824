@@ -50,6 +50,14 @@ func (rf *Raft) _runAsFollower() {
 				case ilink.replyCh <- reply:
 				}
 
+			case snapshotReq:
+				reply := rf.handleSnapshotReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
+				}
+
 			case RequestVoteReq:
 				reply, _ := rf.handleRequestVoteReq(ilink)
 				select {

@@ -115,6 +115,14 @@ func (rf *Raft) runAsCandidate() {
 				case ilink.replyCh <- reply:
 				}
 
+			case snapshotReq:
+				reply := rf.handleSnapshotReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
+				}
+
 			case RequestVoteReq:
 				reply, suppressed := rf.handleRequestVoteReq(ilink)
 				select {

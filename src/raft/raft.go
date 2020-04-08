@@ -93,6 +93,13 @@ type LogEntry struct {
 	Term    int
 }
 
+type snapshotLog struct {
+	log               []LogEntry
+	snapshot          []byte
+	lastIncludedIndex int
+	lastIncludedTerm  int
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -180,6 +187,41 @@ func (rf *Raft) handleGetLogEntryTermReq(link inLink) getLogEntryTermReply {
 	}
 	e := rf.log[req.index-1]
 	return getLogEntryTermReply{true, e.Term}
+}
+
+type snapshotReq struct {
+	lastIncludedIndex int
+	state             []byte
+}
+
+type snapshotReply struct {
+	ok bool
+}
+
+func (rf *Raft) Snapshot() bool {
+	link := newInLink(snapshotReq{})
+	select {
+	case <-rf.killed:
+		return false
+	case rf.inLinkCh <- link:
+	}
+
+	select {
+	case <-rf.killed:
+		return false
+	case iReply := <-link.replyCh:
+		reply := iReply.(snapshotReply)
+		return reply.ok
+	}
+}
+
+func (rf *Raft) handleSnapshotReq(link inLink) snapshotReply {
+	req := link.req.(snapshotReq)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(req.lastIncludedIndex)
+	e.Encode(req.state)
+	return snapshotReply{true}
 }
 
 //

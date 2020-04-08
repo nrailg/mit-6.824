@@ -55,6 +55,7 @@ type RaftKV struct {
 	maxRaftState int // snapshot if log grows this big
 
 	// Your definitions here.
+	persister   *raft.Persister
 	cond        *sync.Cond
 	lastApplied int
 	kvs         map[string]string
@@ -205,6 +206,9 @@ func (kv *RaftKV) run() {
 		kv.lastApplied = applyMsg.Index
 		kv.cond.Broadcast()
 		kv.Unlock()
+
+		if kv.persister.RaftStateSize() >= kv.maxRaftState {
+		}
 	}
 }
 
@@ -233,6 +237,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// Your initialization code here.
 	kv.cond = sync.NewCond(&kv.mtx)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.persister = persister
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastApplied = 0
 	kv.kvs = make(map[string]string)
