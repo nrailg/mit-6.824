@@ -24,7 +24,7 @@ func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
 		}
 		prevLogTerm := 0
 		if prevLogIndex >= 0 {
-			prevLogTerm = rf.log[prevLogIndex].Term
+			prevLogTerm = rf.ssLog.at(prevLogIndex).Term
 		}
 		req := AppendEntriesReq{
 			rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]LogEntry, 0), rf.commitIndex,
@@ -51,7 +51,7 @@ func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
 		if i == rf.me {
 			continue
 		}
-		if len(rf.log) > rf.nextIndex[i] {
+		if rf.ssLog.len() > rf.nextIndex[i] {
 			// avoid broadcasting storm
 			if !tryAnotherAppendEntries(rf.appendEntriesJustSent[i]) {
 				continue
@@ -64,13 +64,13 @@ func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
 			}
 			prevLogTerm := 0
 			if prevLogIndex >= 0 {
-				prevLogTerm = rf.log[prevLogIndex].Term
+				prevLogTerm = rf.ssLog.at(prevLogIndex).Term
 			}
-			nEntries := len(rf.log) - rf.nextIndex[i]
+			nEntries := rf.ssLog.len() - rf.nextIndex[i]
 			entries := make([]LogEntry, nEntries)
 			si := rf.nextIndex[i]
 			sj := si + nEntries
-			copy(entries, rf.log[si:sj])
+			rf.ssLog.copyTo(entries, si, sj)
 			req := AppendEntriesReq{
 				rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex,
 			}
@@ -113,7 +113,7 @@ func (rf *Raft) updateNextIndexAndMatchIndex(reply AppendEntriesReply) {
 func (rf *Raft) updateCommitIndex() {
 	n := len(rf.peers)
 	maj := n/2 + 1
-	for nci := rf.commitIndex + 1; nci < len(rf.log); nci++ {
+	for nci := rf.commitIndex + 1; nci < rf.ssLog.len(); nci++ {
 		cnt := 1
 		for i := 0; i < n; i++ {
 			if i == rf.me {
@@ -123,7 +123,7 @@ func (rf *Raft) updateCommitIndex() {
 				cnt++
 			}
 		}
-		if cnt >= maj && rf.log[nci].Term == rf.currentTerm {
+		if cnt >= maj && rf.ssLog.at(nci).Term == rf.currentTerm {
 			rf.commitIndex = nci
 		}
 	}
@@ -131,7 +131,7 @@ func (rf *Raft) updateCommitIndex() {
 
 func (rf *Raft) applyIfPossible() {
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-		applyMsg := ApplyMsg{i + 1, rf.log[i].Command, false, nil}
+		applyMsg := ApplyMsg{i + 1, rf.ssLog.at(i).Command, false, nil}
 		//DPrintf("raft[%d] apply %+v", rf.me, applyMsg)
 		rf.applyCh <- applyMsg
 	}
@@ -165,7 +165,7 @@ func (rf *Raft) runAsLeader() {
 	rf.nextIndex = make([]int, n)
 	rf.matchIndex = make([]int, n)
 	for i := 0; i < n; i++ {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.ssLog.len()
 		rf.matchIndex[i] = -1
 	}
 
@@ -213,14 +213,14 @@ func (rf *Raft) runAsLeader() {
 
 			case startReq:
 				// len(rf.log) + 1, since the test cases start index at 1 (other than 0).
-				reply := startReply{len(rf.log) + 1, rf.currentTerm, true}
+				reply := startReply{rf.ssLog.len() + 1, rf.currentTerm, true}
 				select {
 				case <-rf.killed:
 					return
 				case ilink.replyCh <- reply:
 				}
 				sreq := req.(startReq)
-				rf.log = append(rf.log, LogEntry{sreq.command, rf.currentTerm})
+				rf.ssLog.append(LogEntry{sreq.command, rf.currentTerm})
 				rf.persist()
 				olink = rf.sendAppendEntriesToPeers(olink)
 

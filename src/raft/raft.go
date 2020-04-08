@@ -94,10 +94,50 @@ type LogEntry struct {
 }
 
 type snapshotLog struct {
-	log               []LogEntry
-	snapshot          []byte
-	lastIncludedIndex int
-	lastIncludedTerm  int
+	Log               []LogEntry
+	Snapshot          []byte
+	LastIncludedIndex int
+	LastIncludedTerm  int
+}
+
+func (l *snapshotLog) len() int {
+	return l.LastIncludedIndex + 1 + len(l.Log)
+}
+
+func (l *snapshotLog) lastIndexAndTerm() (int, int) {
+	i := len(l.Log) - 1
+	if i == -1 {
+		return l.LastIncludedIndex, l.LastIncludedTerm
+	} else {
+		t := l.Log[i].Term
+		return l.len() - 1, t
+	}
+}
+
+func (l *snapshotLog) at(i int) LogEntry {
+	i -= l.LastIncludedIndex + 1
+	if i < 0 || i >= len(l.Log) {
+		panic("invalid index")
+	}
+	return l.Log[i]
+}
+
+func (l *snapshotLog) placeAt(i int, e LogEntry) {
+	i -= l.LastIncludedIndex + 1
+	if i < l.len() {
+		l.Log = l.Log[:i]
+	}
+	l.Log = append(l.Log, e)
+}
+
+func (l *snapshotLog) append(e LogEntry) {
+	l.Log = append(l.Log, e)
+}
+
+func (l *snapshotLog) copyTo(entries []LogEntry, i int, j int) {
+	i -= l.LastIncludedIndex + 1
+	j -= l.LastIncludedIndex + 1
+	copy(entries, l.Log[i:j])
 }
 
 //
@@ -121,7 +161,7 @@ type Raft struct {
 
 	currentTerm int
 	votedFor    int
-	log         []LogEntry
+	ssLog       snapshotLog // []LogEntry
 	commitIndex int
 	lastApplied int
 	nextIndex   []int
@@ -182,10 +222,10 @@ func (rf *Raft) GetLogEntryTerm(index int) (bool, int) {
 
 func (rf *Raft) handleGetLogEntryTermReq(link inLink) getLogEntryTermReply {
 	req := link.req.(getLogEntryTermReq)
-	if req.index > len(rf.log) {
+	if req.index > rf.ssLog.len() {
 		return getLogEntryTermReply{false, 0}
 	}
-	e := rf.log[req.index-1]
+	e := rf.ssLog.at(req.index - 1)
 	return getLogEntryTermReply{true, e.Term}
 }
 
@@ -243,7 +283,7 @@ func (rf *Raft) persist() {
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	e.Encode(rf.ssLog)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -263,7 +303,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
-	d.Decode(&rf.log)
+	d.Decode(&rf.ssLog)
 }
 
 //
@@ -329,13 +369,7 @@ func (rf *Raft) sendRequestVote(server int, req RequestVoteReq, reply *RequestVo
 }
 
 func (rf *Raft) upToDate(lastLogIndex int, lastLogTerm int) bool {
-	myLastLogIndex := len(rf.log) - 1
-	var myLastLogTerm int
-	if myLastLogIndex == -1 { // maybe more assertions
-		myLastLogTerm = 0
-	} else {
-		myLastLogTerm = rf.log[myLastLogIndex].Term
-	}
+	myLastLogIndex, myLastLogTerm := rf.ssLog.lastIndexAndTerm()
 	if myLastLogTerm != lastLogTerm {
 		return myLastLogTerm < lastLogTerm
 	}
@@ -465,26 +499,25 @@ func (rf *Raft) checkPrevLogEntry(prevLogIndex int, prevLogTerm int) bool {
 	if prevLogIndex == -1 {
 		return true
 	}
-	if prevLogIndex >= len(rf.log) {
+	if prevLogIndex >= rf.ssLog.len() {
 		return false
 	}
-	return rf.log[prevLogIndex].Term == prevLogTerm
+	return rf.ssLog.at(prevLogIndex).Term == prevLogTerm
 }
 
 func (rf *Raft) appendEntriesToLocal(prevLogIndex int, entries []LogEntry) int {
 	for i := 0; i < len(entries); i++ {
 		j := prevLogIndex + 1 + i
-		if j < len(rf.log) {
-			if rf.log[j].Term != entries[i].Term {
-				rf.log = rf.log[:j]
-				rf.log = append(rf.log, entries[i])
+		if j < rf.ssLog.len() {
+			if rf.ssLog.at(j).Term != entries[i].Term {
+				rf.ssLog.placeAt(j, entries[i])
 			} else {
-				if rf.log[j].Command != entries[i].Command {
+				if rf.ssLog.at(j).Command != entries[i].Command {
 					panic("same index and term but different command")
 				}
 			}
 		} else {
-			rf.log = append(rf.log, entries[i])
+			rf.ssLog.append(entries[i])
 		}
 	}
 	rf.persist()
@@ -515,16 +548,16 @@ func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, s
 			reply.Success = eAppendEntriesLogInconsistent
 
 			var cf int
-			if req.PrevLogIndex < len(rf.log) {
+			if req.PrevLogIndex < rf.ssLog.len() {
 				cf = req.PrevLogIndex
 			} else {
-				cf = len(rf.log) - 1
+				cf = rf.ssLog.len() - 1
 			}
 			if cf < 0 {
 				cf = 0
 			} else {
-				ct := rf.log[cf].Term
-				for cf > 0 && rf.log[cf-1].Term == ct {
+				ct := rf.ssLog.at(cf).Term
+				for cf > 0 && rf.ssLog.at(cf-1).Term == ct {
 					cf -= 1
 				}
 			}
@@ -668,7 +701,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = make([]LogEntry, 0)
+	//rf.log = make([]LogEntry, 0)
+	rf.ssLog = snapshotLog{
+		Log:               make([]LogEntry, 0),
+		Snapshot:          nil,
+		LastIncludedIndex: -1,
+		LastIncludedTerm:  0,
+	}
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 

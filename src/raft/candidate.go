@@ -8,13 +8,7 @@ import (
 
 func (rf *Raft) sendRequestVoteToPeers() outLink {
 	n := len(rf.peers)
-	lastLogIndex := len(rf.log) - 1
-	var lastLogTerm int
-	if lastLogIndex == -1 {
-		lastLogTerm = 0
-	} else {
-		lastLogTerm = rf.log[lastLogIndex].Term
-	}
+	lastLogIndex, lastLogTerm := rf.ssLog.lastIndexAndTerm()
 	reqs := make(map[int]interface{})
 	for i := 0; i < n; i++ {
 		if i == rf.me {
