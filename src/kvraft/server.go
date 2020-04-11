@@ -120,8 +120,19 @@ func (kv *RaftKV) commitLogEntry(op Op) (index int, term int, isLeader bool) {
 	case <-onLoseLeadership:
 		return -1, curTerm, false
 	case <-onCommitDone:
-		ok, newTerm := kv.rf.GetLogEntryTerm(index)
-		if !ok || newTerm != curTerm {
+		// 最初是检查 term 是否匹配，但是 snapshot 之后检查不到了。
+		// ```golang
+		// ok, newTerm := kv.rf.GetLogEntryTerm(index)
+		// if !ok || newTerm != curTerm {
+		//     return -1, curTerm, false
+		// } else {
+		//     return index, curTerm, true
+		// }
+		// ```
+		newTerm, isLeader := kv.rf.GetState()
+		if !isLeader || curTerm != newTerm {
+			// 可能在经过两次选举之后重新夺回 leadership，但是依旧回传 `isLeader=false`。重复利用
+			// 客户端的失败处理逻辑。
 			return -1, curTerm, false
 		} else {
 			return index, curTerm, true
@@ -207,8 +218,21 @@ func (kv *RaftKV) run() {
 		kv.cond.Broadcast()
 		kv.Unlock()
 
-		if kv.persister.RaftStateSize() >= kv.maxRaftState {
-		}
+		/*
+			if kv.maxRaftState > 0 {
+				DPrintf("kv[%d] check snapshot, raftstatesize = %d", kv.me, kv.persister.RaftStateSize())
+				if kv.persister.RaftStateSize() >= kv.maxRaftState {
+					DPrintf("kv[%d] snapshot", kv.me)
+					w := new(bytes.Buffer)
+					e := gob.NewEncoder(w)
+					kv.Lock()
+					e.Encode(kv.kvs)
+					kv.Unlock()
+					machineState := w.Bytes()
+					kv.rf.Snapshot(applyMsg.Index, machineState)
+				}
+			}
+		*/
 	}
 }
 

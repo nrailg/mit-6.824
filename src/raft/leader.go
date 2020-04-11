@@ -224,14 +224,6 @@ func (rf *Raft) runAsLeader() {
 				rf.persist()
 				olink = rf.sendAppendEntriesToPeers(olink)
 
-			case getLogEntryTermReq:
-				reply := rf.handleGetLogEntryTermReq(ilink)
-				select {
-				case <-rf.killed:
-					return
-				case ilink.replyCh <- reply:
-				}
-
 			case snapshotReq:
 				reply := rf.handleSnapshotReq(ilink)
 				select {

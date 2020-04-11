@@ -194,41 +194,6 @@ func (rf *Raft) GetState() (int, bool) {
 	}
 }
 
-type getLogEntryTermReq struct {
-	index int
-}
-
-type getLogEntryTermReply struct {
-	ok   bool
-	term int
-}
-
-func (rf *Raft) GetLogEntryTerm(index int) (bool, int) {
-	link := newInLink(getLogEntryTermReq{index})
-	select {
-	case <-rf.killed:
-		return false, 0
-	case rf.inLinkCh <- link:
-	}
-
-	select {
-	case <-rf.killed:
-		return false, 0
-	case iReply := <-link.replyCh:
-		reply := iReply.(getLogEntryTermReply)
-		return reply.ok, reply.term
-	}
-}
-
-func (rf *Raft) handleGetLogEntryTermReq(link inLink) getLogEntryTermReply {
-	req := link.req.(getLogEntryTermReq)
-	if req.index > rf.ssLog.len() {
-		return getLogEntryTermReply{false, 0}
-	}
-	e := rf.ssLog.at(req.index - 1)
-	return getLogEntryTermReply{true, e.Term}
-}
-
 type snapshotReq struct {
 	lastIncludedIndex int
 	state             []byte
@@ -238,8 +203,8 @@ type snapshotReply struct {
 	ok bool
 }
 
-func (rf *Raft) Snapshot() bool {
-	link := newInLink(snapshotReq{})
+func (rf *Raft) Snapshot(index int, state []byte) bool {
+	link := newInLink(snapshotReq{index - 1, state}) // -1 是为了适配 applyMsg 的接口
 	select {
 	case <-rf.killed:
 		return false
@@ -257,10 +222,12 @@ func (rf *Raft) Snapshot() bool {
 
 func (rf *Raft) handleSnapshotReq(link inLink) snapshotReply {
 	req := link.req.(snapshotReq)
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(req.lastIncludedIndex)
-	e.Encode(req.state)
+	lastIncludedTerm := rf.ssLog.at(req.lastIncludedIndex).Term
+	rf.ssLog.Snapshot = req.state
+	rf.ssLog.Log = rf.ssLog.Log[req.lastIncludedIndex-rf.ssLog.LastIncludedIndex:]
+	rf.ssLog.LastIncludedIndex = req.lastIncludedIndex
+	rf.ssLog.LastIncludedTerm = lastIncludedTerm
+	rf.persist()
 	return snapshotReply{true}
 }
 
