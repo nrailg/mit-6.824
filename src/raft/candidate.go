@@ -133,6 +133,18 @@ func (rf *Raft) runAsCandidate() {
 					return
 				}
 
+			case installSnapshotReq:
+				reply, suppressed := rf.handleInstallSnapshotReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
+				}
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+
 			default:
 				panic(fmt.Sprintf("unknown req = %+v", req))
 			}

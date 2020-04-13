@@ -403,7 +403,6 @@ func TestPersistPartitionUnreliable(t *testing.T) {
 // even if minority doesn't respond.
 //
 func TestSnapshotRPC(t *testing.T) {
-	return
 	const nservers = 3
 	maxraftstate := 1000
 	cfg := make_config(t, "snapshotrpc", nservers, false, maxraftstate)

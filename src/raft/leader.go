@@ -18,13 +18,10 @@ func (rf *Raft) sendHeartbeatToPeers(prevOutLink outLink) outLink {
 		if i == rf.me {
 			continue
 		}
-		prevLogIndex := rf.nextIndex[i] - 1
-		if prevLogIndex < -1 {
-			panic(fmt.Sprintf("prevLogIndex[%d] < -1", i))
-		}
+		prevLogIndex := rf.ssLog.len() - 1
 		prevLogTerm := 0
 		if prevLogIndex >= 0 {
-			prevLogTerm = rf.ssLog.at(prevLogIndex).Term
+			prevLogTerm = rf.ssLog.termAt(prevLogIndex)
 		}
 		req := AppendEntriesReq{
 			rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]LogEntry, 0), rf.commitIndex,
@@ -63,18 +60,33 @@ func (rf *Raft) sendAppendEntriesToPeers(prevOutLink outLink) outLink {
 				panic(fmt.Sprintf("prevLogIndex[%d] < -1", i))
 			}
 			prevLogTerm := 0
-			if prevLogIndex >= 0 {
-				prevLogTerm = rf.ssLog.at(prevLogIndex).Term
+
+			if rf.nextIndex[i] > rf.ssLog.LastIncludedIndex {
+				if prevLogIndex >= 0 {
+					prevLogTerm = rf.ssLog.termAt(prevLogIndex)
+				}
+				nEntries := rf.ssLog.len() - rf.nextIndex[i]
+				entries := make([]LogEntry, nEntries)
+				si := rf.nextIndex[i]
+				sj := si + nEntries
+				rf.ssLog.copyTo(entries, si, sj)
+				req := AppendEntriesReq{
+					rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex,
+				}
+				reqs[i] = req
+			} else {
+				// 需要发送的 entry 已经被 snapshot 弃掉了，InstallSnapshot。
+				req := installSnapshotReq{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.ssLog.LastIncludedIndex,
+					LastIncludedTerm:  rf.ssLog.LastIncludedTerm,
+					Offset:            0,
+					Data:              rf.persister.ReadSnapshot(),
+					Done:              true,
+				}
+				reqs[i] = req
 			}
-			nEntries := rf.ssLog.len() - rf.nextIndex[i]
-			entries := make([]LogEntry, nEntries)
-			si := rf.nextIndex[i]
-			sj := si + nEntries
-			rf.ssLog.copyTo(entries, si, sj)
-			req := AppendEntriesReq{
-				rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex,
-			}
-			reqs[i] = req
 		}
 	}
 	olink := newOutLink(reqs, prevOutLink.replyCh)
@@ -123,7 +135,7 @@ func (rf *Raft) updateCommitIndex() {
 				cnt++
 			}
 		}
-		if cnt >= maj && rf.ssLog.at(nci).Term == rf.currentTerm {
+		if cnt >= maj && rf.ssLog.termAt(nci) == rf.currentTerm {
 			rf.commitIndex = nci
 		}
 	}
@@ -140,7 +152,7 @@ func (rf *Raft) applyIfPossible() {
 
 func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) (suppressed bool) {
 	if reply.Term < rf.currentTerm {
-		// TODO actually should not be here, confusing, bad.
+		// 实际上不可能出现，但是这里被复用来表示网络错误。我当时为什么会这么写？WTF。
 		return false
 	} else if reply.Term == rf.currentTerm {
 		rf.updateNextIndexAndMatchIndex(reply)
@@ -151,6 +163,24 @@ func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) (suppressed b
 		if reply.Success != eAppendEntriesLessTerm {
 			panic("reply.Success != eAppendEntriesLessTerm")
 		}
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.persist()
+		return true
+	}
+}
+
+func (rf *Raft) handleInstallSnapshotReply(reply installSnapshotReply) (suppressed bool) {
+	if reply.Term < rf.currentTerm {
+		panic("reply.Term < rf.currentTerm")
+	} else if reply.Term == rf.currentTerm {
+		req := reply.req
+		peer := reply.me
+		rf.nextIndex[peer] = req.LastIncludedIndex + 1
+		rf.matchIndex[peer] = req.LastIncludedIndex
+		rf.appendEntriesJustSent[peer] = time.Time{}
+		return false
+	} else {
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.persist()
@@ -187,13 +217,25 @@ func (rf *Raft) runAsLeader() {
 			olink = rf.sendHeartbeatToPeers(olink)
 
 		case iReply := <-olink.replyCh:
-			reply := iReply.(AppendEntriesReply)
-			suppressed := rf.handleAppendEntriesReply(reply)
-			if suppressed {
-				rf.state = eFollower
-				return
+			switch iReply.(type) {
+			case AppendEntriesReply:
+				reply := iReply.(AppendEntriesReply)
+				suppressed := rf.handleAppendEntriesReply(reply)
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+				olink = rf.sendAppendEntriesToPeers(olink)
+
+			case installSnapshotReply:
+				reply := iReply.(installSnapshotReply)
+				suppressed := rf.handleInstallSnapshotReply(reply)
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+				olink = rf.sendAppendEntriesToPeers(olink)
 			}
-			olink = rf.sendAppendEntriesToPeers(olink)
 
 		case ilink := <-rf.inLinkCh:
 			//DPrintf("raft[%d](leader) ilink %+v", rf.me, ilink)
@@ -246,6 +288,18 @@ func (rf *Raft) runAsLeader() {
 
 			case AppendEntriesReq:
 				reply, suppressed := rf.handleAppendEntriesReq(ilink)
+				select {
+				case <-rf.killed:
+					return
+				case ilink.replyCh <- reply:
+				}
+				if suppressed {
+					rf.state = eFollower
+					return
+				}
+
+			case installSnapshotReq:
+				reply, suppressed := rf.handleInstallSnapshotReq(ilink)
 				select {
 				case <-rf.killed:
 					return
