@@ -457,7 +457,6 @@ func TestSnapshotRPC(t *testing.T) {
 }
 
 func TestSnapshotRecover(t *testing.T) {
-	return
 	fmt.Printf("Test: persistence with one client and snapshots ...\n")
 	GenericTest(t, "snapshot", 1, false, true, false, 1000)
 }

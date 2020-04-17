@@ -240,6 +240,7 @@ func (rf *Raft) handleSnapshotReq(link inLink) snapshotReply {
 	lastIncludedTerm := rf.ssLog.termAt(req.lastIncludedIndex)
 	rf.ssLog.Log = rf.ssLog.Log[req.lastIncludedIndex-rf.ssLog.LastIncludedIndex:]
 	rf.ssLog.LastIncludedIndex = req.lastIncludedIndex
+	//DPrintf("rf[%d].handleSnapshotReq, LastIncludedIndex=%d", rf.me, rf.ssLog.LastIncludedIndex)
 	rf.ssLog.LastIncludedTerm = lastIncludedTerm
 	rf.persist()
 	rf.persister.SaveSnapshot(req.snapshot)
@@ -555,9 +556,11 @@ func (rf *Raft) handleAppendEntriesReq(link inLink) (reply AppendEntriesReply, s
 				if lastNewEntry < req.LeaderCommit {
 					if rf.commitIndex < lastNewEntry {
 						rf.commitIndex = lastNewEntry
+						//DPrintf("rf[%d].handleAppendEntriesReq.1, commitIndex=%d", rf.me, rf.commitIndex)
 					}
 				} else {
 					rf.commitIndex = req.LeaderCommit
+					//DPrintf("rf[%d].handleAppendEntriesReq.2, commitIndex=%d", rf.me, rf.commitIndex)
 				}
 			}
 			rf.applyIfPossible()
@@ -620,8 +623,9 @@ func (rf *Raft) handleInstallSnapshotReq(link inLink) (reply installSnapshotRepl
 			reply.Term = rf.currentTerm
 		}
 
-		reqI := req.LastIncludedIndex - rf.ssLog.LastIncludedIndex - 1
+		reqI := req.LastIncludedIndex - rf.ssLog.LastIncludedIndex
 		rf.ssLog.LastIncludedIndex = req.LastIncludedIndex
+		//DPrintf("rf[%d].handleInstallSnapshotReq, LastIncludedIndex=%d", rf.me, rf.ssLog.LastIncludedIndex)
 		rf.ssLog.LastIncludedTerm = req.LastIncludedTerm
 
 		// > If existing log entry has same index and term as snapshot’s last included entry, retain log
@@ -634,6 +638,7 @@ func (rf *Raft) handleInstallSnapshotReq(link inLink) (reply installSnapshotRepl
 			rf.ssLog.Log = make([]LogEntry, 0)
 			rf.commitIndex = req.LastIncludedIndex
 			rf.lastApplied = req.LastIncludedIndex
+			//DPrintf("rf[%d].handleInstallSnapshotReq, commitIndex=%d", rf.me, req.LastIncludedIndex)
 		}
 		rf.persist()
 		rf.persister.SaveSnapshot(req.Data)
@@ -784,17 +789,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	//rf.log = make([]LogEntry, 0)
 	rf.ssLog = snapshotLog{
 		Log:               make([]LogEntry, 0),
 		LastIncludedIndex: -1,
 		LastIncludedTerm:  0,
 	}
-	rf.commitIndex = -1
-	rf.lastApplied = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.commitIndex = rf.ssLog.LastIncludedIndex
+	rf.lastApplied = rf.ssLog.LastIncludedIndex
+	//DPrintf("rf[%d].Make, commitIndex=%d, lastApplied=%d", rf.me, rf.commitIndex, rf.lastApplied)
 
 	go rf.run()
 	go rf.sendRequests()

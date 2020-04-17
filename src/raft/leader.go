@@ -135,19 +135,28 @@ func (rf *Raft) updateCommitIndex() {
 				cnt++
 			}
 		}
+		if cnt >= maj && nci < rf.ssLog.LastIncludedIndex {
+			DPrintf("rf[%d].updateCommitIndex, commitIndex=%d, nci=%d, lastIncludedIndex=%d, logLen=%d",
+				rf.me, rf.commitIndex, nci, rf.ssLog.LastIncludedIndex, rf.ssLog.len())
+		}
 		if cnt >= maj && rf.ssLog.termAt(nci) == rf.currentTerm {
 			rf.commitIndex = nci
+			//DPrintf("rf[%d].updateCommitIndex, commitIndex=%d", rf.me, rf.commitIndex)
 		}
 	}
 }
 
 func (rf *Raft) applyIfPossible() {
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		//if i < 0 || i <= rf.ssLog.LastIncludedIndex {
+		//	DPrintf("rf[%d], i=%d, lastIncludedIndex=%d, lastApplied=%d", rf.me, i, rf.ssLog.LastIncludedIndex, rf.lastApplied)
+		//}
 		applyMsg := ApplyMsg{i + 1, rf.ssLog.at(i).Command, false, nil}
-		//DPrintf("raft[%d] apply %+v", rf.me, applyMsg)
+		//DPrintf("rf[%d] apply %+v", rf.me, applyMsg)
 		rf.applyCh <- applyMsg
 	}
 	rf.lastApplied = rf.commitIndex
+	//DPrintf("rf[%d].applyIfPossible, lastApplied = %d", rf.me, rf.lastApplied)
 }
 
 func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) (suppressed bool) {

@@ -141,6 +141,25 @@ func (kv *RaftKV) commitLogEntry(op Op) (index int, term int, isLeader bool) {
 	}
 }
 
+func (kv *RaftKV) snapshotIfNecessary() {
+	if kv.maxRaftState > 0 {
+		//DPrintf("kv[%d].snapshotIfNecessary, raftstatesize=%d", kv.me, kv.persister.RaftStateSize())
+		if kv.persister.RaftStateSize() >= kv.maxRaftState {
+			w := new(bytes.Buffer)
+			e := gob.NewEncoder(w)
+			kv.Lock()
+			e.Encode(kv.kvs)
+			e.Encode(kv.cmdHistory)
+			lastApplied := kv.lastApplied
+			e.Encode(lastApplied)
+			kv.Unlock() // FIXME: 此处顺序可能出现问题
+			snapshot := w.Bytes()
+			//DPrintf("kv[%d].snapshot, lastApplied=%d", kv.me, lastApplied)
+			kv.rf.Snapshot(lastApplied, snapshot)
+		}
+	}
+}
+
 func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 	// Your code here.
 	op := Op{OpGet, req.Key, "", -1, -1}
@@ -163,6 +182,7 @@ func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 		}
 		kv.Unlock()
 	}
+	kv.snapshotIfNecessary()
 }
 
 func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
@@ -177,6 +197,7 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 		reply.IsLeader = true
 		reply.Err = OK
 	}
+	kv.snapshotIfNecessary()
 }
 
 //
@@ -206,48 +227,26 @@ func (kv *RaftKV) run() {
 			//DPrintf("kv[%d] apply %+v", kv.me, applyMsg)
 			kv.Lock()
 			histCmdId, ok := kv.cmdHistory[op.ClerkId]
-			kv.Unlock()
 
 			if !ok || histCmdId < op.CmdId {
 				kv.cmdHistory[op.ClerkId] = op.CmdId
 
 				if op.Op == OpGet {
 				} else if op.Op == OpPut {
-					kv.Lock()
 					kv.kvs[op.Key] = op.Value
-					kv.Unlock()
 				} else if op.Op == OpAppend {
-					kv.Lock()
 					kv.kvs[op.Key] += op.Value
-					kv.Unlock()
 				} else {
 					panic(fmt.Sprintf("unknown op = %s", op.Op))
 				}
 			}
 
-			kv.Lock()
 			if applyMsg.Index <= kv.lastApplied {
 				panic("applyMsg.Index <= kv.lastApplied")
 			}
 			kv.lastApplied = applyMsg.Index
 			kv.cond.Broadcast()
 			kv.Unlock()
-
-			if kv.maxRaftState > 0 {
-				//DPrintf("kv[%d] check snapshot, raftstatesize = %d", kv.me, kv.persister.RaftStateSize())
-				if kv.persister.RaftStateSize() >= kv.maxRaftState {
-					//DPrintf("kv[%d] snapshot", kv.me)
-					w := new(bytes.Buffer)
-					e := gob.NewEncoder(w)
-					kv.Lock()
-					e.Encode(kv.kvs)
-					e.Encode(kv.cmdHistory)
-					e.Encode(kv.lastApplied)
-					kv.Unlock()
-					snapshot := w.Bytes()
-					kv.rf.Snapshot(applyMsg.Index, snapshot)
-				}
-			}
 		}
 	}
 }
@@ -275,13 +274,23 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxRaftState = maxRaftState
 
 	// Your initialization code here.
+	snapshot := persister.ReadSnapshot()
+	if snapshot == nil {
+		kv.kvs = make(map[string]string)
+		kv.cmdHistory = make(map[int]int)
+		kv.lastApplied = 0
+	} else {
+		r := bytes.NewBuffer(snapshot)
+		d := gob.NewDecoder(r)
+		d.Decode(&kv.kvs)
+		d.Decode(&kv.cmdHistory)
+		d.Decode(&kv.lastApplied)
+	}
+
 	kv.cond = sync.NewCond(&kv.mtx)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.persister = persister
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.lastApplied = 0
-	kv.kvs = make(map[string]string)
-	kv.cmdHistory = make(map[int]int)
 
 	go kv.run()
 	return kv
