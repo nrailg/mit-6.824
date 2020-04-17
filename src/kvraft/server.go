@@ -57,6 +57,7 @@ type RaftKV struct {
 
 	// Your definitions here.
 	persister   *raft.Persister
+	isKilled    bool
 	cond        *sync.Cond
 	lastApplied int
 	kvs         map[string]string
@@ -141,25 +142,6 @@ func (kv *RaftKV) commitLogEntry(op Op) (index int, term int, isLeader bool) {
 	}
 }
 
-func (kv *RaftKV) snapshotIfNecessary() {
-	if kv.maxRaftState > 0 {
-		//DPrintf("kv[%d].snapshotIfNecessary, raftstatesize=%d", kv.me, kv.persister.RaftStateSize())
-		if kv.persister.RaftStateSize() >= kv.maxRaftState {
-			w := new(bytes.Buffer)
-			e := gob.NewEncoder(w)
-			kv.Lock()
-			e.Encode(kv.kvs)
-			e.Encode(kv.cmdHistory)
-			lastApplied := kv.lastApplied
-			e.Encode(lastApplied)
-			kv.Unlock() // FIXME: 此处顺序可能出现问题
-			snapshot := w.Bytes()
-			//DPrintf("kv[%d].snapshot, lastApplied=%d", kv.me, lastApplied)
-			kv.rf.Snapshot(lastApplied, snapshot)
-		}
-	}
-}
-
 func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 	// Your code here.
 	op := Op{OpGet, req.Key, "", -1, -1}
@@ -182,7 +164,6 @@ func (kv *RaftKV) Get(req *GetArgs, reply *GetReply) {
 		}
 		kv.Unlock()
 	}
-	kv.snapshotIfNecessary()
 }
 
 func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
@@ -197,7 +178,6 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 		reply.IsLeader = true
 		reply.Err = OK
 	}
-	kv.snapshotIfNecessary()
 }
 
 //
@@ -209,6 +189,10 @@ func (kv *RaftKV) PutAppend(req *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.Lock()
+	kv.isKilled = true
+	kv.Unlock()
+	kv.cond.Broadcast()
 }
 
 func (kv *RaftKV) run() {
@@ -251,6 +235,35 @@ func (kv *RaftKV) run() {
 	}
 }
 
+func (kv *RaftKV) snapshotIfNecessary() {
+	if kv.maxRaftState <= 0 {
+		return
+	}
+	for {
+		kv.Lock()
+		kv.cond.Wait()
+		if kv.isKilled {
+			kv.Unlock()
+			return
+		}
+		kv.Unlock()
+
+		if kv.persister.RaftStateSize() >= kv.maxRaftState {
+			w := new(bytes.Buffer)
+			e := gob.NewEncoder(w)
+			kv.Lock()
+			e.Encode(kv.kvs)
+			e.Encode(kv.cmdHistory)
+			lastApplied := kv.lastApplied
+			e.Encode(lastApplied)
+			kv.Unlock()
+			snapshot := w.Bytes()
+			kv.rf.Snapshot(lastApplied, snapshot)
+			//DPrintf("kv[%d].snapshot, lastApplied=%d, size=%d", kv.me, lastApplied, kv.persister.RaftStateSize())
+		}
+	}
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -288,10 +301,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	}
 
 	kv.cond = sync.NewCond(&kv.mtx)
+	kv.isKilled = false
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.persister = persister
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	go kv.run()
+	go kv.snapshotIfNecessary()
 	return kv
 }
