@@ -198,6 +198,8 @@ func (kv *RaftKV) Kill() {
 func (kv *RaftKV) run() {
 	for applyMsg := range kv.applyCh {
 		if applyMsg.UseSnapshot {
+			// 当 rf 已经调整了 `LastIncludedIndex` 并且通过 chan 传递的时候，此时 kv 还没跟上同步状态，
+			// 此时其他 goroutine 读取 `lastApplied` 会发现 kv 和 rf 的不一致。
 			r := bytes.NewBuffer(applyMsg.Snapshot)
 			d := gob.NewDecoder(r)
 			kv.Lock()
@@ -205,6 +207,7 @@ func (kv *RaftKV) run() {
 			d.Decode(&kv.cmdHistory)
 			d.Decode(&kv.lastApplied)
 			kv.Unlock()
+			//DPrintf("kv[%d].run1, lastApplied=%d", kv.me, kv.lastApplied)
 
 		} else {
 			op := applyMsg.Command.(Op)
@@ -229,8 +232,10 @@ func (kv *RaftKV) run() {
 				panic("applyMsg.Index <= kv.lastApplied")
 			}
 			kv.lastApplied = applyMsg.Index
+			//DPrintf("kv[%d].run2, lastApplied=%d", kv.me, kv.lastApplied)
 			kv.cond.Broadcast()
 			kv.Unlock()
+			// 为何不在此处 snapshot？因为 `applyCh` 和 `rf.inLinkCh` 会循环等待发生死锁。= = my bad.
 		}
 	}
 }
@@ -239,6 +244,7 @@ func (kv *RaftKV) snapshotIfNecessary() {
 	if kv.maxRaftState <= 0 {
 		return
 	}
+	// 为什么放在一个单独的 routine 而不是 `Get/Put/Append` 后面呢？因为只有 leader 会执行 `Get/Put/Append`。
 	for {
 		kv.Lock()
 		kv.cond.Wait()
@@ -258,8 +264,13 @@ func (kv *RaftKV) snapshotIfNecessary() {
 			e.Encode(lastApplied)
 			kv.Unlock()
 			snapshot := w.Bytes()
+			// 放在和 `RaftKV.run` 独立的 routine 里，可能会在 `applyCh` 里的 `useSnapshot` apply 之前 snapshot，
+			// 会发现 `LastIncludedIndex` 冲突。
+			// 如果 lastApplied 相同，那么 snapshot 理应相同。更小的 lastApplied 的 snapshot 可以被抛弃。就用这么一个
+			// 比较 dirty 的方案解决。
 			kv.rf.Snapshot(lastApplied, snapshot)
 			//DPrintf("kv[%d].snapshot, lastApplied=%d, size=%d", kv.me, lastApplied, kv.persister.RaftStateSize())
+			//DPrintf("num of goroutines: %d", runtime.NumGoroutine())
 		}
 	}
 }
@@ -299,6 +310,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		d.Decode(&kv.cmdHistory)
 		d.Decode(&kv.lastApplied)
 	}
+	//DPrintf("kv[%d].Make, lastApplied=%d", kv.me, kv.lastApplied)
 
 	kv.cond = sync.NewCond(&kv.mtx)
 	kv.isKilled = false

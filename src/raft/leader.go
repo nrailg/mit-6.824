@@ -148,9 +148,9 @@ func (rf *Raft) updateCommitIndex() {
 
 func (rf *Raft) applyIfPossible() {
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-		//if i < 0 || i <= rf.ssLog.LastIncludedIndex {
-		//	DPrintf("rf[%d], i=%d, lastIncludedIndex=%d, lastApplied=%d", rf.me, i, rf.ssLog.LastIncludedIndex, rf.lastApplied)
-		//}
+		if i < 0 || i <= rf.ssLog.LastIncludedIndex {
+			DPrintf("rf[%d], i=%d, lastIncludedIndex=%d, lastApplied=%d", rf.me, i, rf.ssLog.LastIncludedIndex, rf.lastApplied)
+		}
 		applyMsg := ApplyMsg{i + 1, rf.ssLog.at(i).Command, false, nil}
 		//DPrintf("rf[%d] apply %+v", rf.me, applyMsg)
 		rf.applyCh <- applyMsg

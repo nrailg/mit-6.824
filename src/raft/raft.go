@@ -237,10 +237,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) bool {
 
 func (rf *Raft) handleSnapshotReq(link inLink) snapshotReply {
 	req := link.req.(snapshotReq)
+	if req.lastIncludedIndex < rf.ssLog.LastIncludedIndex {
+		// See `kvraft/server.go` for a reason.
+		return snapshotReply{false}
+	}
 	lastIncludedTerm := rf.ssLog.termAt(req.lastIncludedIndex)
 	rf.ssLog.Log = rf.ssLog.Log[req.lastIncludedIndex-rf.ssLog.LastIncludedIndex:]
+	//DPrintf("rf[%d].handleSnapshotReq, LastIncludedIndex=%d, New=%d",
+	//	rf.me, rf.ssLog.LastIncludedIndex, req.lastIncludedIndex)
 	rf.ssLog.LastIncludedIndex = req.lastIncludedIndex
-	//DPrintf("rf[%d].handleSnapshotReq, LastIncludedIndex=%d", rf.me, rf.ssLog.LastIncludedIndex)
 	rf.ssLog.LastIncludedTerm = lastIncludedTerm
 	rf.persist()
 	rf.persister.SaveSnapshot(req.snapshot)
@@ -624,21 +629,25 @@ func (rf *Raft) handleInstallSnapshotReq(link inLink) (reply installSnapshotRepl
 		}
 
 		reqI := req.LastIncludedIndex - rf.ssLog.LastIncludedIndex
+		//DPrintf("rf[%d].handleInstallSnapshotReq, LastIncludedIndex=%d, New=%d",
+		//	rf.me, rf.ssLog.LastIncludedIndex, req.LastIncludedIndex)
 		rf.ssLog.LastIncludedIndex = req.LastIncludedIndex
-		//DPrintf("rf[%d].handleInstallSnapshotReq, LastIncludedIndex=%d", rf.me, rf.ssLog.LastIncludedIndex)
 		rf.ssLog.LastIncludedTerm = req.LastIncludedTerm
 
 		// > If existing log entry has same index and term as snapshot’s last included entry, retain log
 		// > entries following it and reply.
 		resetSM := false
-		if reqI >= 0 && reqI < len(rf.ssLog.Log) && rf.ssLog.Log[reqI].Term == req.LastIncludedTerm {
+		// if reqI >= 0 && reqI < len(rf.ssLog.Log) && rf.ssLog.Log[reqI].Term == req.LastIncludedTerm {
+		if reqI >= 0 && reqI < len(rf.ssLog.Log) && rf.ssLog.Log[reqI].Term == req.LastIncludedTerm &&
+			req.LastIncludedIndex <= rf.lastApplied {
+			// 如果 `lastApplied` 还 < `req.LastIncludedIndex`，那么会一起被舍弃掉。
 			rf.ssLog.Log = rf.ssLog.Log[reqI:]
 		} else {
 			resetSM = true
 			rf.ssLog.Log = make([]LogEntry, 0)
 			rf.commitIndex = req.LastIncludedIndex
 			rf.lastApplied = req.LastIncludedIndex
-			//DPrintf("rf[%d].handleInstallSnapshotReq, commitIndex=%d", rf.me, req.LastIncludedIndex)
+			//DPrintf("rf[%d].handleInstallSnapshotReq2, commitIndex=%d", rf.me, req.LastIncludedIndex)
 		}
 		rf.persist()
 		rf.persister.SaveSnapshot(req.Data)
@@ -679,7 +688,7 @@ func (rf *Raft) sendRequests() {
 			return
 
 		case link := <-rf.outLinkCh:
-			// DPrintf("raft[%d] sendRequests outLink = %+v", rf.me, link)
+			//DPrintf("raft[%d] sendRequests outLink = %+v", rf.me, link)
 			for peer, iReq := range link.reqs {
 				switch iReq.(type) {
 
